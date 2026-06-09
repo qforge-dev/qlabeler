@@ -1,0 +1,16 @@
+.DS_Store
+.git
+.venv
+__pycache__
+models
+.cache
+data/*
+outputs/*
+*.mp3
+*.wav
+*.zip
+*.tar
+*.tar.gz
+*.safetensors
+*.pt
+*.pth

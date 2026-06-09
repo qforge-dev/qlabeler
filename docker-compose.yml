@@ -1,0 +1,56 @@
+services:
+  audio-flamingo:
+    build:
+      context: .
+      dockerfile: docker/audio-flamingo-next/Dockerfile
+    image: qlabeler/audio-flamingo-next-think:cuda12.8
+    working_dir: /workspace
+    ports:
+      - "${AUDIO_FLAMINGO_PORT:-8888}:8888"
+    gpus: all
+    ipc: host
+    shm_size: "16gb"
+    environment:
+      JUPYTER_TOKEN: "${JUPYTER_TOKEN:-qlabeler}"
+      HF_TOKEN: "${HF_TOKEN:-}"
+      HUGGING_FACE_HUB_TOKEN: "${HF_TOKEN:-}"
+      HF_HOME: /workspace/.cache/huggingface
+      TRANSFORMERS_CACHE: /workspace/.cache/huggingface/transformers
+      HF_HUB_ENABLE_HF_TRANSFER: "1"
+      PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    volumes:
+      - .:/workspace
+      - hf-cache:/workspace/.cache/huggingface
+
+  sam-audio:
+    build:
+      context: .
+      dockerfile: docker/sam-audio-large/Dockerfile
+    image: qlabeler/sam-audio-large:cuda12.8
+    working_dir: /workspace
+    ports:
+      - "${SAM_AUDIO_PORT:-8889}:8889"
+    gpus: all
+    ipc: host
+    shm_size: "16gb"
+    environment:
+      JUPYTER_TOKEN: "${JUPYTER_TOKEN:-qlabeler}"
+      HF_TOKEN: "${HF_TOKEN:-}"
+      HUGGING_FACE_HUB_TOKEN: "${HF_TOKEN:-}"
+      HF_HOME: /workspace/.cache/huggingface
+      HF_HUB_ENABLE_HF_TRANSFER: "1"
+      PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+      USE_TF: "0"
+      USE_FLAX: "0"
+      TRANSFORMERS_NO_TF: "1"
+      TRANSFORMERS_NO_FLAX: "1"
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    volumes:
+      - .:/workspace
+      - hf-cache:/workspace/.cache/huggingface
+
+volumes:
+  hf-cache:
