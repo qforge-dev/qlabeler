@@ -1,380 +1,259 @@
-# Audio Analysis Notebooks And Docker Images
+# Audio Model APIs
 
-This repo contains three small audio notebooks and two GPU Docker images:
+This repo contains the original working notebooks plus production-style FastAPI
+wrappers for two audio models:
 
-- `audio_flamingo_next_mp3_qa.ipynb`: ask `nvidia/audio-flamingo-next-think-hf`
-  questions about uploaded MP3/audio files.
-- `split_mp3_30s_overlap.ipynb`: split one MP3 into 30-second chunks with
-  5 seconds of overlap, then zip the chunks.
-- `sam_audio_large_mp3_separation.ipynb`: isolate a described sound from an MP3
-  with `facebook/sam-audio-large`.
+- `nvidia/audio-flamingo-next-think-hf` for audio question answering.
+- `facebook/sam-audio-large` for separating one described sound from a short
+  audio clip.
 
-The Docker setup is intended for a rented H100 machine where you SSH in and run
-`docker compose`.
+The two services run in separate Python virtual environments. This avoids the
+dependency conflicts that showed up when both model stacks were installed into
+one notebook runtime.
 
-## Docker On H100
+## Fresh Machine Setup
 
-The repo defines two separate images:
+Use this path on a fresh RunPod or Ubuntu GPU machine.
 
-- `qlabeler/audio-flamingo-next-think:cuda12.8`
-- `qlabeler/sam-audio-large:cuda12.8`
+1. Clone the repo and enter it:
 
-Both images use a PyTorch CUDA 12.8 base image and start JupyterLab. The SAM
-image is a clean dedicated environment, so it avoids the TensorFlow/JAX/protobuf
-conflicts that showed up in hosted notebooks.
-
-Host prerequisites:
-
-- NVIDIA driver installed on the rented machine
-- Docker and Docker Compose v2
-- NVIDIA Container Toolkit configured
-- Hugging Face access token with access to gated models, especially
-  `facebook/sam-audio-large`
-
-On the remote machine:
-
-```bash
-cp .env.example .env
-nano .env
-```
-
-Set at least:
-
-```text
-HF_TOKEN=hf_your_token_here
-JUPYTER_TOKEN=some-long-token
-```
-
-Build both images:
-
-```bash
-docker compose build audio-flamingo sam-audio
-```
-
-Start Audio Flamingo Next Think:
-
-```bash
-docker compose up audio-flamingo
-```
-
-Start SAM-Audio Large:
-
-```bash
-docker compose up sam-audio
-```
-
-You can also start both services, but each notebook can load a large model, so
-it is usually cleaner to run only the one you are actively using:
-
-```bash
-docker compose up
-```
-
-Ports:
-
-- Audio Flamingo JupyterLab: `http://localhost:8888`
-- SAM-Audio JupyterLab: `http://localhost:8889`
-
-From your laptop, use an SSH tunnel:
-
-```bash
-ssh -L 8888:localhost:8888 -L 8889:localhost:8889 user@your-h100-host
-```
-
-Then open the local URLs above and use `JUPYTER_TOKEN` from `.env`.
-
-Shared paths inside both containers:
-
-```text
-/workspace
-/workspace/data
-/workspace/outputs
-/workspace/.cache/huggingface
-```
-
-Put input audio in `data/` and write outputs to `outputs/`. Hugging Face model
-downloads are stored in the shared `hf-cache` Docker volume.
-
-When using the Docker images, skip notebook setup/restart cells. The
-dependencies are already baked into the image. Start from login/import/model
-loading cells.
-
-To verify GPU visibility inside either container:
-
-```bash
-docker compose run --rm audio-flamingo nvidia-smi
-docker compose run --rm sam-audio nvidia-smi
-```
-
-If a PyTorch base image tag ever disappears, override it during build:
-
-```bash
-docker compose build \
-  --build-arg BASE_IMAGE=pytorch/pytorch:2.8.0-cuda12.8-cudnn9-runtime \
-  audio-flamingo sam-audio
-```
-
-## Q&A Notebook
-
-Open:
-
-```text
-audio_flamingo_next_mp3_qa.ipynb
-```
-
-The notebook uses only the Think checkpoint:
-
-```text
-nvidia/audio-flamingo-next-think-hf
-```
-
-The Q&A notebook is focused on sound analysis: SFX, environment sounds,
-ambience, music, voices, and timestamped sound events.
-
-## Recommended Runtime
-
-Use a GPU runtime if possible.
-
-- Practical minimum: 24 GB VRAM for shorter clips.
-- Safer target: 48 GB VRAM, especially for longer audio.
-- CPU-only inference is not recommended.
-
-The model is an 8B BF16 checkpoint. The first load downloads the model weights
-and can take a while.
-
-## How To Run Q&A
-
-1. Run the setup cell.
-
-   The setup cell installs the notebook dependencies:
-
-   ```python
-   %pip install -q --upgrade transformers accelerate librosa soundfile
+   ```bash
+   cd /workspace
+   git clone <this-repo-url> qlabeler-simpler
+   cd /workspace/qlabeler-simpler
    ```
 
-   It intentionally does not upgrade `torch`, because Colab/Kaggle runtimes
-   usually already have a matching PyTorch/CUDA stack.
+2. Create `.env` and add your Hugging Face token:
 
-2. Run the import/runtime cell.
-
-   This selects CUDA, MPS, or CPU and sets:
-
-   ```python
-   MODEL_ID = "nvidia/audio-flamingo-next-think-hf"
+   ```bash
+   cp .env.example .env
+   nano .env
    ```
 
-3. Run the model loading cell.
+   `facebook/sam-audio-large` is gated, so `HF_TOKEN` must belong to a Hugging
+   Face account with access to that model.
 
-   The notebook checks whether `AutoModel` resolves to a generative class. If
-   the installed `transformers` maps `AutoModel` to a non-generative base class,
-   it falls back to `AutoModelForSeq2SeqLM` so `model.generate(...)` works.
+3. Bootstrap everything:
 
-4. Upload or choose an audio file.
-
-   - In Google Colab, the notebook opens a file picker.
-   - In local Jupyter, paste a local MP3/audio path.
-
-5. Edit the `## Question` cell.
-
-   This cell contains the prompt. The default prompt asks the model to detect:
-
-   - footsteps, movement, impacts, Foley
-   - cars, engines, horns, brakes, sirens
-   - wind, rain, thunder, water, insects
-   - animal sounds
-   - doors, keys, dishes, appliances, electronics
-   - traffic beds, crowds, construction, machinery, alarms
-   - music, singing, rhythm, score, source music
-   - speech, narration, announcements, laughter, shouting
-
-   It asks for a timestamped timeline with confidence and evidence.
-
-6. Adjust generation settings if needed.
-
-   ```python
-   MAX_NEW_TOKENS = 4096
-   REPETITION_PENALTY = 1.2
+   ```bash
+   ./scripts/setup_model_apis.sh bootstrap
    ```
 
-7. Run the final answer cell.
+That single command installs OS packages, creates two isolated virtual
+environments, installs model dependencies, patches the SAM-Audio loader to use
+`torchaudio`, and starts both FastAPI services.
 
-## MP3 Chunk Splitter Notebook
+To download and load model weights during setup, set this in `.env` or inline:
 
-Open:
+```bash
+LOAD_MODELS=1 ./scripts/setup_model_apis.sh bootstrap
+```
+
+## Service Commands
+
+The setup script is also the service control script:
+
+```bash
+./scripts/setup_model_apis.sh doctor
+./scripts/setup_model_apis.sh status
+./scripts/setup_model_apis.sh load
+./scripts/setup_model_apis.sh logs audio-flamingo-next
+./scripts/setup_model_apis.sh logs sam-audio-large
+./scripts/setup_model_apis.sh restart
+./scripts/setup_model_apis.sh stop
+```
+
+Default paths:
 
 ```text
-split_mp3_30s_overlap.ipynb
+repo:       /workspace/qlabeler-simpler
+venvs:      /workspace/venvs
+outputs:    /workspace/outputs
+logs:       /workspace/logs/qlabeler-simpler
+HF cache:   /workspace/.cache/huggingface
 ```
 
-This notebook takes one MP3 and writes overlapping chunks:
-
-- chunk length: 30 seconds
-- overlap: 5 seconds
-- step between chunk starts: 25 seconds
-
-For example, the chunks start at:
+Default ports:
 
 ```text
-00:00, 00:25, 00:50, 01:15, ...
+Audio Flamingo: http://127.0.0.1:8001
+SAM-Audio:      http://127.0.0.1:8002
 ```
 
-Each chunk filename includes its index and timestamp range:
+All paths and ports can be changed in `.env`; see [.env.example](.env.example).
+
+## Health And Readiness
+
+Health checks confirm that the API process is running:
+
+```bash
+curl http://127.0.0.1:8001/healthz
+curl http://127.0.0.1:8002/healthz
+```
+
+Readiness shows whether model weights are loaded:
+
+```bash
+curl http://127.0.0.1:8001/readyz
+curl http://127.0.0.1:8002/readyz
+```
+
+Models lazy-load on first inference. To preload explicitly:
+
+```bash
+./scripts/setup_model_apis.sh load
+```
+
+## Audio Flamingo API
+
+Endpoint:
 
 ```text
-input_chunk_0001_00h00m00s-00h00m30s.mp3
-input_chunk_0002_00h00m25s-00h00m55s.mp3
+POST /v1/audio-flamingo/ask
+POST /ask
 ```
 
-The notebook saves chunks into:
+Example:
+
+```bash
+curl -X POST http://127.0.0.1:8001/v1/audio-flamingo/ask \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "audio_path": "/workspace/data/chunk_001.mp3",
+    "input": "List the audible sound sources. Then suggest one concise SAM-Audio target prompt.",
+    "max_new_tokens": 256,
+    "repetition_penalty": 1.2
+  }'
+```
+
+Response:
+
+```json
+{
+  "model_id": "nvidia/audio-flamingo-next-think-hf",
+  "audio_path": "/workspace/data/chunk_001.mp3",
+  "prompt": "List the audible sound sources. Then suggest one concise SAM-Audio target prompt.",
+  "text": "SOUNDS: horse hooves, cinematic strings\nSAM_PROMPT: horse hooves"
+}
+```
+
+Accepted audio fields: `audio_path`, `file_path`, `file`, or `audio_url`.
+Accepted prompt fields: `prompt`, `input`, or `question`.
+
+Only local filesystem paths and `file://` URLs are supported today.
+
+## SAM-Audio API
+
+Endpoint:
 
 ```text
-mp3_chunks/
+POST /v1/sam-audio/separate
+POST /separate
 ```
 
-and creates:
+Pass exactly one target sound description. For example, use `horse hooves`, not
+`horse hooves from background strings`.
 
-```text
-mp3_chunks.zip
+Example:
+
+```bash
+curl -X POST http://127.0.0.1:8002/v1/sam-audio/separate \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "audio_path": "/workspace/data/chunk_001.mp3",
+    "input": "horse hooves",
+    "output_prefix": "chunk_001_horse_hooves",
+    "max_audio_seconds": 35,
+    "predict_spans": false,
+    "reranking_candidates": 1
+  }'
 ```
 
-In Google Colab, the final cell downloads the zip. In local Jupyter, it prints
-the zip path.
+Response includes target, residual, and zip refs:
 
-The splitter uses `pydub` and `ffmpeg`. If `ffmpeg` is missing and `apt-get` is
-available, the notebook attempts to install it.
-
-## SAM-Audio Large Separation Notebook
-
-Open:
-
-```text
-sam_audio_large_mp3_separation.ipynb
+```json
+{
+  "model_id": "facebook/sam-audio-large",
+  "request_id": "c0ffee...",
+  "audio_path": "/workspace/data/chunk_001.mp3",
+  "description": "horse hooves",
+  "duration_seconds": 30.0,
+  "sample_rate": 48000,
+  "target": {
+    "wav": {"path": "/workspace/outputs/sam-audio-large/.../chunk_001_horse_hooves_target.wav", "url": "/files/sam-audio-large/.../chunk_001_horse_hooves_target.wav"},
+    "mp3": {"path": "/workspace/outputs/sam-audio-large/.../chunk_001_horse_hooves_target.mp3", "url": "/files/sam-audio-large/.../chunk_001_horse_hooves_target.mp3"}
+  },
+  "residual": {
+    "wav": {"path": "/workspace/outputs/sam-audio-large/.../chunk_001_horse_hooves_residual.wav", "url": "/files/sam-audio-large/.../chunk_001_horse_hooves_residual.wav"},
+    "mp3": {"path": "/workspace/outputs/sam-audio-large/.../chunk_001_horse_hooves_residual.mp3", "url": "/files/sam-audio-large/.../chunk_001_horse_hooves_residual.mp3"}
+  },
+  "zip": {"path": "/workspace/outputs/sam-audio-large/.../chunk_001_horse_hooves_outputs.zip", "url": "/files/sam-audio-large/.../chunk_001_horse_hooves_outputs.zip"}
+}
 ```
 
-This notebook uses `facebook/sam-audio-large` to separate one described target
-sound from an MP3. It saves:
+Accepted target fields: `prompt`, `input`, or `description`.
 
-```text
-sam_audio_outputs/target.wav
-sam_audio_outputs/residual.wav
-sam_audio_outputs/target.mp3
-sam_audio_outputs/residual.mp3
-sam_audio_outputs.zip
+SAM-Audio is configured for short clips by default. Split long files into
+30-second chunks before calling the endpoint.
+
+## Example Pipeline Call
+
+Ask Audio Flamingo for a one-sound target prompt:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8001/v1/audio-flamingo/ask \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "audio_path": "/workspace/data/example_chunk.mp3",
+    "input": "Identify audible sources and return exactly two lines: SOUNDS: <sources>; SAM_PROMPT: <one target sound only>.",
+    "max_new_tokens": 256
+  }'
 ```
 
-The model is gated on Hugging Face. Before loading it, request access to the
-model repo and log in from the notebook.
+Then pass only the `SAM_PROMPT` value to SAM-Audio:
 
-The notebook loads SAM-Audio Large in audio-only CUDA BF16 mode. It deletes the
-vision encoder before moving the model to GPU, which avoids spending VRAM on
-video features you are not using:
-
-```python
-DEVICE = "cuda"
-DTYPE = torch.bfloat16
-model = SAMAudio.from_pretrained(MODEL_ID, proxies=None, resume_download=False)
-model = disable_vision_encoder_for_audio_only(model)
-model = model.to(DEVICE, DTYPE).eval()
+```bash
+curl -sS -X POST http://127.0.0.1:8002/v1/sam-audio/separate \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "audio_path": "/workspace/data/example_chunk.mp3",
+    "input": "horse hooves",
+    "output_prefix": "example_chunk_horse_hooves"
+  }'
 ```
 
-Rankers and the span predictor are kept. The default settings still use:
+## Moving Files From RunPod
 
-```python
-PREDICT_SPANS = False
-RERANKING_CANDIDATES = 1
+RunPod's SSH proxy may not support SCP or port forwarding on all pods. The
+reliable fallback is `runpodctl send/receive`.
+
+From the pod:
+
+```bash
+runpodctl send --code qlabeler-output /workspace/outputs/sam-audio-large/<request_id>/<prefix>_outputs.zip
 ```
 
-It wraps preprocessing and separation in:
+RunPod may append a suffix to the code. Use the exact code it prints, then run
+this on your local machine:
 
-```python
-with torch.autocast(device_type=DEVICE, dtype=DTYPE):
-    inputs = processor(...).to(DEVICE)
-    result = model.separate(inputs)
+```bash
+runpodctl receive qlabeler-output-10
 ```
 
-This notebook raises early if CUDA is not available. It is configured for
-30-second clips and does not do chunking; use the splitter notebook first for
-longer MP3s.
+Install local `runpodctl` on macOS:
 
-The editable prompt cell uses:
-
-```python
-DESCRIPTION = "footsteps"
-MAX_AUDIO_SECONDS = 35
-PREDICT_SPANS = False
-RERANKING_CANDIDATES = 1
+```bash
+brew install runpod/runpodctl/runpodctl
 ```
 
-Use short noun phrases or verb phrases for `DESCRIPTION`, such as `footsteps`,
-`car engine`, `wind`, `dog barking`, `piano`, or `man speaking`.
+## Notebook References
 
-`predict_spans=True` and higher reranking candidates can improve results, but
-they increase latency and memory use.
+The notebooks remain useful as reference workflows and for experiments:
 
-SAM-Audio pulls a broad dependency tree. Use a fresh dedicated runtime for this
-notebook and do not mix it with JAX, TensorFlow, or Google SDK work.
+- `audio_flamingo_next_mp3_qa.ipynb`
+- `sam_audio_large_mp3_separation.ipynb`
+- `split_mp3_30s_overlap.ipynb`
 
-Some pip warnings are expected in hosted notebook images:
-
-- SAM-Audio's codec stack uses `descript-audiotools`, which requires
-  `protobuf<3.20`.
-- Many Google/JAX/TensorFlow packages in hosted runtimes want newer protobuf.
-- CLAP pins NumPy `<2`, while JAX/TensorFlow often require NumPy `>=2`.
-
-For this notebook, prioritize SAM-Audio's audio stack. Do not upgrade protobuf
-after installing SAM-Audio.
-
-The setup cell uninstalls TensorFlow/JAX packages because this notebook does not
-use them, and they can crash on import after SAM-Audio installs the protobuf
-version required by its audio stack:
-
-```text
-ImportError: cannot import name 'runtime_version' from 'google.protobuf'
-```
-
-The import cell also sets `USE_TF=0` and `USE_FLAX=0` before importing
-`sam_audio`.
-
-The setup cell uses `--no-warn-conflicts` to suppress those known hosted-runtime
-warnings. Actual install failures still show. To inspect dependency conflicts,
-turn on `RUN_PIP_CHECK` in the optional diagnostics cell.
-
-After the SAM-Audio setup cell, run the notebook's restart cell before importing
-`sam_audio`. If you see:
-
-```text
-ValueError: numpy.dtype size changed, may indicate binary incompatibility
-```
-
-the runtime was not restarted after pip replaced NumPy. Restart the runtime, skip
-the setup/restart cells, and continue from the dependency diagnostics or Hugging
-Face login cell.
-
-The notebook also pins the model-loading stack to the compatible API family:
-
-```python
-%pip install -q --upgrade --no-warn-conflicts "transformers>=4.54,<5" "huggingface_hub>=0.34,<1.0"
-```
-
-and loads SAM-Audio with:
-
-```python
-SAMAudio.from_pretrained(MODEL_ID, proxies=None, resume_download=False)
-```
-
-This avoids a compatibility error where SAM-Audio expects `proxies` and
-`resume_download` but newer `huggingface_hub` mixin code does not pass them.
-
-## Troubleshooting
-
-If `torchvision::nms does not exist` appears, restart the runtime and rerun the
-setup cell. The notebook uninstalls `torchvision` because a mismatched optional
-`torchvision` build can break `transformers` imports.
-
-If pip reports CUDA package conflicts after upgrading `torch`, start a fresh
-runtime. The notebook no longer upgrades `torch`; it leaves the runtime's
-existing PyTorch/CUDA stack alone.
-
-If dtype errors appear during generation, rerun the latest import/config cell
-and the `ask_audio` definition cell. The notebook uses CUDA autocast during
-generation so BF16 model weights and the audio frontend can run together.
+The service installer follows the notebook setup that worked on the tested A100
+RunPod machine, including isolated dependencies and the SAM-Audio audio loader
+patch needed for MP3/WAV handling.
