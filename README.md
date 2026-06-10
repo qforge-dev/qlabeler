@@ -78,11 +78,17 @@ cd /workspace/qlabeler
 Use this on your Mac or any non-GPU development machine:
 
 ```bash
-./scripts/run_pipeline_dev.sh
+make dev
 ```
 
 This starts only the pipeline dashboard/API on `http://127.0.0.1:8000` with
 `PIPELINE_BACKEND=mock`. It does not install or run the real model services.
+
+You can also run the equivalent root-level wrapper:
+
+```bash
+./dev
+```
 
 Mock behavior:
 
