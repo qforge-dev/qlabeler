@@ -92,7 +92,7 @@ You can also run the equivalent root-level wrapper:
 
 Mock behavior:
 
-- sound gate checks local audio duration/RMS;
+- sound gate runs local dBFS/peak/windowed active-audio analysis;
 - Audio Flamingo returns deterministic mock sources and `SAM_PROMPT: horse hooves`;
 - SAM-Audio copies the chunk into target/residual mock files.
 
@@ -203,6 +203,18 @@ POST /api/tasks/{task_id}/retry
 
 The dashboard shows job totals, chunk stage counts, queue depths, recent
 failures, and recent target/residual outputs.
+
+The sound gate is local in both mock and real backend modes. It drops digital
+silence and barely audible chunks before they reach Audio Flamingo or SAM-Audio.
+Important thresholds:
+
+```text
+PIPELINE_SOUND_GATE_MIN_DBFS=-50
+PIPELINE_SOUND_GATE_MIN_PEAK_DBFS=-55
+PIPELINE_SOUND_GATE_WINDOW_MS=100
+PIPELINE_SOUND_GATE_MIN_ACTIVE_MS=250
+PIPELINE_SOUND_GATE_MIN_ACTIVE_RATIO=0.01
+```
 
 Local mock-compatible endpoints are also available from the pipeline service:
 

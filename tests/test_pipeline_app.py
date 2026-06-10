@@ -9,14 +9,14 @@ from fastapi.testclient import TestClient
 from services.pipeline_app import PipelineConfig, create_app
 
 
-def write_tone(path: Path, *, seconds: float = 1.0, sample_rate: int = 16_000) -> None:
+def write_tone(path: Path, *, seconds: float = 1.0, sample_rate: int = 16_000, amplitude: int = 12_000) -> None:
     frames = int(seconds * sample_rate)
     with wave.open(str(path), "wb") as wav:
         wav.setnchannels(1)
         wav.setsampwidth(2)
         wav.setframerate(sample_rate)
         for index in range(frames):
-            value = int(12_000 * math.sin(2 * math.pi * 440 * index / sample_rate))
+            value = int(amplitude * math.sin(2 * math.pi * 440 * index / sample_rate))
             wav.writeframesraw(value.to_bytes(2, "little", signed=True))
 
 
@@ -111,6 +111,48 @@ def test_uploaded_audio_job_is_persisted_and_processed(tmp_path: Path) -> None:
     assert source_path.parent.name == "uploads"
     assert detail["job"]["status"] == "complete"
     assert detail["stems"]
+
+
+def test_sound_gate_skips_digital_silence(tmp_path: Path) -> None:
+    client, runtime = make_app(tmp_path)
+    audio_path = tmp_path / "workspace" / "silence.wav"
+    write_tone(audio_path, seconds=1.0, amplitude=0)
+
+    with client:
+        response = client.post("/api/jobs", json={"audio_path": str(audio_path)})
+        assert response.status_code == 200
+        job_id = response.json()["job"]["id"]
+
+        assert runtime.process_until_idle(max_tasks=20) == 1
+        detail = client.get(f"/api/jobs/{job_id}").json()
+
+    assert detail["job"]["status"] == "complete"
+    assert detail["chunks"][0]["stage"] == "skipped_silent"
+    assert len(detail["tasks"]) == 1
+    assert detail["tasks"][0]["queue"] == "sound_gate"
+    assert detail["tasks"][0]["result"]["has_sound"] is False
+    assert detail["tasks"][0]["result"]["dbfs"] is None
+    assert not detail["stems"]
+
+
+def test_sound_gate_skips_barely_hearable_audio(tmp_path: Path) -> None:
+    client, runtime = make_app(tmp_path)
+    audio_path = tmp_path / "workspace" / "quiet.wav"
+    write_tone(audio_path, seconds=1.0, amplitude=8)
+
+    with client:
+        response = client.post("/api/jobs", json={"audio_path": str(audio_path)})
+        assert response.status_code == 200
+        job_id = response.json()["job"]["id"]
+
+        assert runtime.process_until_idle(max_tasks=20) == 1
+        detail = client.get(f"/api/jobs/{job_id}").json()
+
+    result = detail["tasks"][0]["result"]
+    assert detail["chunks"][0]["stage"] == "skipped_silent"
+    assert result["has_sound"] is False
+    assert result["peak_dbfs"] < result["thresholds"]["min_peak_dbfs"]
+    assert not detail["stems"]
 
 
 def test_failed_task_can_be_retried(tmp_path: Path) -> None:

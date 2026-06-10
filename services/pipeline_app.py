@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import shutil
 import sqlite3
 import threading
-import time
 import uuid
 import zipfile
 from contextlib import asynccontextmanager
@@ -132,7 +132,11 @@ class PipelineConfig:
     worker_interval_seconds: float = 1.0
     chunk_ms: int = 30_000
     overlap_ms: int = 5_000
-    sound_gate_min_rms: int = 1
+    sound_gate_min_dbfs: float = -50.0
+    sound_gate_min_peak_dbfs: float = -55.0
+    sound_gate_window_ms: int = 100
+    sound_gate_min_active_ms: int = 250
+    sound_gate_min_active_ratio: float = 0.01
     request_timeout_seconds: float = 600.0
 
     @classmethod
@@ -151,7 +155,11 @@ class PipelineConfig:
             worker_interval_seconds=float(os.environ.get("PIPELINE_WORKER_INTERVAL_SECONDS", "1.0")),
             chunk_ms=int(os.environ.get("PIPELINE_CHUNK_SECONDS", "30")) * 1000,
             overlap_ms=int(os.environ.get("PIPELINE_OVERLAP_SECONDS", "5")) * 1000,
-            sound_gate_min_rms=int(os.environ.get("PIPELINE_SOUND_GATE_MIN_RMS", "1")),
+            sound_gate_min_dbfs=float(os.environ.get("PIPELINE_SOUND_GATE_MIN_DBFS", "-50")),
+            sound_gate_min_peak_dbfs=float(os.environ.get("PIPELINE_SOUND_GATE_MIN_PEAK_DBFS", "-55")),
+            sound_gate_window_ms=int(os.environ.get("PIPELINE_SOUND_GATE_WINDOW_MS", "100")),
+            sound_gate_min_active_ms=int(os.environ.get("PIPELINE_SOUND_GATE_MIN_ACTIVE_MS", "250")),
+            sound_gate_min_active_ratio=float(os.environ.get("PIPELINE_SOUND_GATE_MIN_ACTIVE_RATIO", "0.01")),
             request_timeout_seconds=float(os.environ.get("PIPELINE_REQUEST_TIMEOUT_SECONDS", "600")),
         )
 
@@ -519,7 +527,7 @@ class PipelineRuntime:
     def process_sound_gate(self, task: dict[str, Any]) -> None:
         payload = json_loads(task["payload_json"], {})
         audio_path = Path(payload["audio_path"])
-        result = self.mock_sound_gate(audio_path)
+        result = self.sound_gate(audio_path)
         timestamp = now_iso()
         with self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -806,14 +814,75 @@ class PipelineRuntime:
             return row["prompt"]
         return "Identify audible sources and return exactly two lines: SOUNDS: <sources>; SAM_PROMPT: <one target sound only>."
 
-    def mock_sound_gate(self, audio_path: Path) -> dict[str, Any]:
-        audio = AudioSegment.from_file(str(audio_path))
+    @staticmethod
+    def amplitude_dbfs(amplitude: float, max_possible_amplitude: float) -> float:
+        if amplitude <= 0 or max_possible_amplitude <= 0:
+            return float("-inf")
+        return 20.0 * math.log10(amplitude / max_possible_amplitude)
+
+    @staticmethod
+    def finite_dbfs(value: float) -> float | None:
+        return round(value, 2) if math.isfinite(value) else None
+
+    def sound_gate(self, audio_path: Path) -> dict[str, Any]:
+        audio = AudioSegment.from_file(str(audio_path)).set_channels(1)
+        duration_ms = len(audio)
+        max_possible = float(audio.max_possible_amplitude)
+        overall_dbfs = self.amplitude_dbfs(float(audio.rms), max_possible)
+        peak_dbfs = self.amplitude_dbfs(float(audio.max), max_possible)
+        window_ms = max(10, self.config.sound_gate_window_ms)
+        active_ms = 0
+        active_windows = 0
+        loudest_window_dbfs = float("-inf")
+        loudest_window_peak_dbfs = float("-inf")
+
+        for start_ms in range(0, duration_ms, window_ms):
+            window = audio[start_ms : min(start_ms + window_ms, duration_ms)]
+            if len(window) <= 0:
+                continue
+            window_dbfs = self.amplitude_dbfs(float(window.rms), max_possible)
+            window_peak_dbfs = self.amplitude_dbfs(float(window.max), max_possible)
+            loudest_window_dbfs = max(loudest_window_dbfs, window_dbfs)
+            loudest_window_peak_dbfs = max(loudest_window_peak_dbfs, window_peak_dbfs)
+            if (
+                window_dbfs >= self.config.sound_gate_min_dbfs
+                and window_peak_dbfs >= self.config.sound_gate_min_peak_dbfs
+            ):
+                active_ms += len(window)
+                active_windows += 1
+
+        active_ratio = active_ms / duration_ms if duration_ms else 0.0
+        has_peak = peak_dbfs >= self.config.sound_gate_min_peak_dbfs
+        has_enough_level = overall_dbfs >= self.config.sound_gate_min_dbfs or loudest_window_dbfs >= self.config.sound_gate_min_dbfs
+        has_enough_active_audio = (
+            active_ms >= self.config.sound_gate_min_active_ms
+            or active_ratio >= self.config.sound_gate_min_active_ratio
+        )
+        has_sound = duration_ms > 0 and has_peak and has_enough_level and has_enough_active_audio
+
         return {
-            "has_sound": len(audio) > 0 and audio.rms >= self.config.sound_gate_min_rms,
-            "duration_ms": len(audio),
+            "has_sound": has_sound,
+            "duration_ms": duration_ms,
             "rms": int(audio.rms),
-            "min_rms": self.config.sound_gate_min_rms,
+            "peak": int(audio.max),
+            "dbfs": self.finite_dbfs(overall_dbfs),
+            "peak_dbfs": self.finite_dbfs(peak_dbfs),
+            "active_ms": active_ms,
+            "active_ratio": round(active_ratio, 4),
+            "active_windows": active_windows,
+            "loudest_window_dbfs": self.finite_dbfs(loudest_window_dbfs),
+            "loudest_window_peak_dbfs": self.finite_dbfs(loudest_window_peak_dbfs),
+            "thresholds": {
+                "min_dbfs": self.config.sound_gate_min_dbfs,
+                "min_peak_dbfs": self.config.sound_gate_min_peak_dbfs,
+                "window_ms": window_ms,
+                "min_active_ms": self.config.sound_gate_min_active_ms,
+                "min_active_ratio": self.config.sound_gate_min_active_ratio,
+            },
         }
+
+    def mock_sound_gate(self, audio_path: Path) -> dict[str, Any]:
+        return self.sound_gate(audio_path)
 
     def mock_audio_flamingo(self, audio_path: Path, prompt: str) -> dict[str, str]:
         return {
