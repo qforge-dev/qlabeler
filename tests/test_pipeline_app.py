@@ -48,6 +48,9 @@ def test_dashboard_summary_initializes_schema(tmp_path: Path) -> None:
     assert data["totals"]["jobs"] == 0
     assert data["totals"]["chunks"] == 0
     assert data["totals"]["stems"] == 0
+    assert data["jobs"]["queued"] == 0
+    assert data["jobs"]["running"] == 0
+    assert data["jobs"]["complete"] == 0
     assert data["queues"]["sound_gate"]["pending"] == 0
     assert data["stages"]["sound_gate"] == 0
 
@@ -61,6 +64,7 @@ def test_mock_pipeline_e2e_creates_target_and_residual_outputs(tmp_path: Path) -
         response = client.post("/api/jobs", json={"audio_path": str(audio_path)})
         assert response.status_code == 200
         job_id = response.json()["job"]["id"]
+        queued_dashboard = client.get("/api/dashboard").json()
 
         processed = runtime.process_until_idle(max_tasks=20)
         assert processed >= 3
@@ -68,6 +72,7 @@ def test_mock_pipeline_e2e_creates_target_and_residual_outputs(tmp_path: Path) -
         detail = client.get(f"/api/jobs/{job_id}").json()
         dashboard = client.get("/api/dashboard").json()
 
+    assert queued_dashboard["jobs"]["queued"] == 1
     assert detail["job"]["status"] == "complete"
     assert detail["chunks"][0]["stage"] == "complete"
     assert detail["stems"]
@@ -76,6 +81,7 @@ def test_mock_pipeline_e2e_creates_target_and_residual_outputs(tmp_path: Path) -
     assert Path(stem["residual"]["wav"]["path"]).is_file()
     assert Path(stem["zip"]["path"]).is_file()
     assert dashboard["tasks"]["completed"] >= 3
+    assert dashboard["jobs"]["complete"] == 1
     assert dashboard["totals"]["stems"] == len(detail["stems"])
     assert dashboard["recent_outputs"][0]["prompt"] == "horse hooves"
 

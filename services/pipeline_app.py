@@ -887,6 +887,10 @@ class PipelineRuntime:
                 "chunks": conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0],
                 "stems": conn.execute("SELECT COUNT(*) FROM stems").fetchone()[0],
             }
+            job_counts = {"queued": 0, "running": 0, "complete": 0, STATUS_FAILED: 0}
+            for row in conn.execute("SELECT status, COUNT(*) AS count FROM jobs GROUP BY status"):
+                job_counts[row["status"]] = row["count"]
+
             task_counts = {status: 0 for status in (STATUS_PENDING, STATUS_RUNNING, STATUS_FAILED, STATUS_COMPLETED)}
             for row in conn.execute("SELECT status, COUNT(*) AS count FROM tasks GROUP BY status"):
                 task_counts[row["status"]] = row["count"]
@@ -949,6 +953,7 @@ class PipelineRuntime:
             "db_path": str(self.config.db_path),
             "output_dir": str(self.config.output_dir),
             "totals": totals,
+            "jobs": job_counts,
             "tasks": task_counts,
             "stages": stage_counts,
             "queues": queue_counts,
@@ -1022,6 +1027,7 @@ DASHBOARD_HTML = """<!doctype html>
     th { color: var(--muted); font-weight: 650; background: #fafbfc; }
     .meta { margin-top: 6px; color: var(--muted); font-size: 13px; }
     .section-head { display: flex; gap: 12px; align-items: center; justify-content: space-between; padding: 14px 16px; border-bottom: 1px solid var(--soft-line); }
+    .section-head h2 { white-space: nowrap; }
     .submit-section { padding: 14px 16px; }
     .submit-section form { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
     .status-strip { display: flex; gap: 8px; flex-wrap: wrap; }
@@ -1230,49 +1236,58 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     function flowStats(data) {
+      const jobs = data.jobs || { queued: 0, running: 0, complete: 0, failed: 0 };
       const soundGate = queue(data, 'sound_gate');
       const audioFlamingo = queue(data, 'audio_flamingo');
       const samAudio = queue(data, 'sam_audio');
+      const activeJobs = number(jobs.queued) + number(jobs.running);
+      const activeChunks = number(data.stages.sound_gate) + number(data.stages.describe_sfx) + number(data.stages.separate_sfx);
+      const soundGateActive = number(soundGate.pending) + number(soundGate.running);
+      const audioFlamingoActive = number(audioFlamingo.pending) + number(audioFlamingo.running);
+      const samAudioActive = number(samAudio.pending) + number(samAudio.running);
       return {
         source: {
-          badge: number(data.totals.jobs),
-          metrics: [['Jobs', data.totals.jobs], ['Queued tasks', data.tasks.pending], ['Running tasks', data.tasks.running]],
+          badge: activeJobs,
+          running: number(jobs.running),
+          failed: number(jobs.failed),
+          metrics: [['Ongoing jobs', activeJobs], ['Queued jobs', jobs.queued], ['Running jobs', jobs.running], ['Failed jobs', jobs.failed]],
         },
         chunks: {
-          badge: number(data.totals.chunks),
-          metrics: [['Chunks', data.totals.chunks], ['Complete', data.stages.complete], ['Failed', data.stages.failed]],
+          badge: activeChunks,
+          failed: number(data.stages.failed),
+          metrics: [['Ongoing chunks', activeChunks], ['Waiting gate', data.stages.sound_gate], ['Describing', data.stages.describe_sfx], ['Separating', data.stages.separate_sfx]],
         },
         sound_gate: {
-          badge: number(soundGate.pending),
+          badge: soundGateActive,
           waiting: number(soundGate.pending),
           running: number(soundGate.running),
           failed: number(soundGate.failed),
           done: number(soundGate.completed),
-          metrics: [['Waiting', soundGate.pending], ['Running', soundGate.running], ['Done', soundGate.completed], ['Failed', soundGate.failed]],
+          metrics: [['Ongoing', soundGateActive], ['Waiting', soundGate.pending], ['Running', soundGate.running], ['Failed', soundGate.failed]],
         },
         describe_sfx: {
-          badge: number(audioFlamingo.pending),
+          badge: audioFlamingoActive,
           waiting: number(audioFlamingo.pending),
           running: number(audioFlamingo.running),
           failed: number(audioFlamingo.failed),
           done: number(audioFlamingo.completed),
-          metrics: [['Waiting', audioFlamingo.pending], ['Running', audioFlamingo.running], ['Done', audioFlamingo.completed], ['Failed', audioFlamingo.failed]],
+          metrics: [['Ongoing', audioFlamingoActive], ['Waiting', audioFlamingo.pending], ['Running', audioFlamingo.running], ['Failed', audioFlamingo.failed]],
         },
         separate_sfx: {
-          badge: number(samAudio.pending),
+          badge: samAudioActive,
           waiting: number(samAudio.pending),
           running: number(samAudio.running),
           failed: number(samAudio.failed),
           done: number(samAudio.completed),
-          metrics: [['Waiting', samAudio.pending], ['Running', samAudio.running], ['Done', samAudio.completed], ['Failed', samAudio.failed]],
+          metrics: [['Ongoing', samAudioActive], ['Waiting', samAudio.pending], ['Running', samAudio.running], ['Failed', samAudio.failed]],
         },
         stems_db: {
-          badge: number(data.totals.stems),
-          metrics: [['Stem rows', data.totals.stems], ['Recent outputs', data.recent_outputs.length], ['Complete chunks', data.stages.complete]],
+          badge: 0,
+          metrics: [['Ongoing writes', 0], ['Stem rows total', data.totals.stems], ['Recent outputs', data.recent_outputs.length]],
         },
         skipped_silent: {
-          badge: number(data.stages.skipped_silent),
-          metrics: [['Silent chunks', data.stages.skipped_silent], ['All chunks', data.totals.chunks]],
+          badge: 0,
+          metrics: [['Ongoing skips', 0], ['Silent chunks total', data.stages.skipped_silent], ['All chunks', data.totals.chunks]],
         },
         failed: {
           badge: number(data.tasks.failed),
@@ -1337,13 +1352,16 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     function renderSummary(data) {
+      const jobs = data.jobs || { queued: 0, running: 0, complete: 0, failed: 0 };
+      const activeJobs = number(jobs.queued) + number(jobs.running);
+      const activeChunks = number(data.stages.sound_gate) + number(data.stages.describe_sfx) + number(data.stages.separate_sfx);
       const pills = [
-        ['Jobs', data.totals.jobs],
-        ['Chunks', data.totals.chunks],
+        ['Total jobs', data.totals.jobs],
+        ['Ongoing jobs', activeJobs],
+        ['Ongoing chunks', activeChunks],
         ['Pending', data.tasks.pending],
         ['Running', data.tasks.running],
         ['Failed', data.tasks.failed],
-        ['Completed', data.tasks.completed],
       ];
       document.getElementById('summary').innerHTML = pills.map(([label, value]) => `<span class="status-pill">${esc(label)} <strong>${value || 0}</strong></span>`).join('');
     }
