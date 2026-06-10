@@ -15,23 +15,23 @@ one notebook runtime.
 
 Use this path on a completely fresh RunPod or Ubuntu GPU machine after SSH.
 
-Run the bootstrap script and provide your repo URL:
+Run the bootstrap script:
 
 ```bash
-REPO_URL=<your-git-repo-url> \
-  bash <(curl -fsSL https://raw.githubusercontent.com/<owner>/<repo>/main/scripts/bootstrap_runpod.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/qforge-dev/qlabeler/main/scripts/bootstrap_runpod.sh)
 ```
 
 If you copied `scripts/bootstrap_runpod.sh` onto the pod manually:
 
 ```bash
-REPO_URL=<your-git-repo-url> bash bootstrap_runpod.sh
+bash bootstrap_runpod.sh
 ```
 
 The script:
 
 - installs clone prerequisites if missing;
-- clones or updates the repo at `/workspace/qlabeler-simpler`;
+- clones or updates `https://github.com/qforge-dev/qlabeler.git` at
+  `/workspace/qlabeler`;
 - prompts securely for `HF_TOKEN` when `.env` does not already contain one;
 - writes `.env`;
 - installs all OS and Python dependencies;
@@ -45,7 +45,8 @@ account with access to that model.
 Useful bootstrap overrides:
 
 ```bash
-REPO_DIR=/workspace/qlabeler-simpler
+REPO_URL=https://github.com/qforge-dev/qlabeler.git
+REPO_DIR=/workspace/qlabeler
 REPO_REF=main
 LOAD_MODELS=1
 ```
@@ -53,8 +54,7 @@ LOAD_MODELS=1
 To download and load model weights during bootstrap:
 
 ```bash
-REPO_URL=<your-git-repo-url> LOAD_MODELS=1 \
-  bash <(curl -fsSL https://raw.githubusercontent.com/<owner>/<repo>/main/scripts/bootstrap_runpod.sh)
+LOAD_MODELS=1 bash <(curl -fsSL https://raw.githubusercontent.com/qforge-dev/qlabeler/main/scripts/bootstrap_runpod.sh)
 ```
 
 ## Manual Setup From An Existing Checkout
@@ -62,7 +62,7 @@ REPO_URL=<your-git-repo-url> LOAD_MODELS=1 \
 If the repo is already cloned and `.env` already has `HF_TOKEN`, run:
 
 ```bash
-cd /workspace/qlabeler-simpler
+cd /workspace/qlabeler
 ./scripts/setup_model_apis.sh bootstrap
 ```
 
@@ -83,10 +83,10 @@ The setup script is also the service control script:
 Default paths:
 
 ```text
-repo:       /workspace/qlabeler-simpler
+repo:       /workspace/qlabeler
 venvs:      /workspace/venvs
 outputs:    /workspace/outputs
-logs:       /workspace/logs/qlabeler-simpler
+logs:       /workspace/logs/qlabeler
 HF cache:   /workspace/.cache/huggingface
 ```
 

@@ -3,8 +3,8 @@ set -euo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
 
-REPO_DIR="${REPO_DIR:-/workspace/qlabeler-simpler}"
-REPO_URL="${REPO_URL:-}"
+REPO_DIR="${REPO_DIR:-/workspace/qlabeler}"
+REPO_URL="${REPO_URL:-https://github.com/qforge-dev/qlabeler.git}"
 REPO_REF="${REPO_REF:-main}"
 UPDATE_REPO="${UPDATE_REPO:-1}"
 LOAD_MODELS="${LOAD_MODELS:-0}"
@@ -12,20 +12,20 @@ LOAD_MODELS="${LOAD_MODELS:-0}"
 usage() {
   cat <<EOF
 Usage:
-  REPO_URL=<git-url> $0
+  $0
 
 This is the one-shot fresh RunPod bootstrap. It installs clone prerequisites,
 clones or updates the repo, prompts for HF_TOKEN when needed, writes .env, then
 installs and starts both model APIs.
 
 Environment:
-  REPO_URL      Git URL to clone when REPO_DIR does not exist.
-  REPO_DIR      Checkout path. Default: /workspace/qlabeler-simpler
+  REPO_URL      Git URL to clone. Default: https://github.com/qforge-dev/qlabeler.git
+  REPO_DIR      Checkout path. Default: /workspace/qlabeler
   REPO_REF      Branch/tag to clone. Default: main
   UPDATE_REPO   Pull clean existing checkouts. Default: 1
   LOAD_MODELS   Load model weights during setup. Default: 0
 
-If REPO_URL is not set and REPO_DIR is missing, the script prompts for it.
+Override REPO_URL only when testing a fork or private mirror.
 If HF_TOKEN is not in .env or the environment, the script prompts securely.
 EOF
 }
