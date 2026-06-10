@@ -860,6 +860,7 @@ class PipelineRuntime:
             totals = {
                 "jobs": conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0],
                 "chunks": conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0],
+                "stems": conn.execute("SELECT COUNT(*) FROM stems").fetchone()[0],
             }
             task_counts = {status: 0 for status in (STATUS_PENDING, STATUS_RUNNING, STATUS_FAILED, STATUS_COMPLETED)}
             for row in conn.execute("SELECT status, COUNT(*) AS count FROM tasks GROUP BY status"):
@@ -962,36 +963,89 @@ DASHBOARD_HTML = """<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="refresh" content="15">
   <title>QLabeler Pipeline</title>
   <style>
-    :root { color-scheme: light; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-    body { margin: 0; background: #f7f8fa; color: #1d2430; }
-    header { padding: 20px 28px; background: #ffffff; border-bottom: 1px solid #d9dee7; }
+    :root {
+      color-scheme: light;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --bg: #f6f7f9;
+      --panel: #ffffff;
+      --ink: #1d2430;
+      --muted: #606a7c;
+      --line: #d9dee7;
+      --soft-line: #edf0f5;
+      --red: #ef4444;
+      --blue: #2f7de1;
+      --green: #23a455;
+      --orange: #f08a00;
+      --slate: #657084;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--ink); }
+    header { padding: 18px 28px; background: var(--panel); border-bottom: 1px solid var(--line); }
     h1 { margin: 0; font-size: 24px; font-weight: 650; letter-spacing: 0; }
-    h2 { margin: 0 0 12px; font-size: 16px; font-weight: 650; letter-spacing: 0; }
-    main { padding: 22px 28px 40px; display: grid; gap: 18px; }
-    .meta { margin-top: 6px; color: #586173; font-size: 13px; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
-    .card, section { background: #ffffff; border: 1px solid #d9dee7; border-radius: 8px; }
-    .card { padding: 14px 16px; min-height: 68px; }
-    .label { color: #657084; font-size: 12px; text-transform: uppercase; }
-    .value { margin-top: 6px; font-size: 28px; font-weight: 700; }
-    section { padding: 16px; overflow: hidden; }
-    table { width: 100%; border-collapse: collapse; font-size: 13px; }
-    th, td { padding: 9px 8px; border-bottom: 1px solid #edf0f5; text-align: left; vertical-align: top; }
-    th { color: #586173; font-weight: 650; background: #fafbfc; }
+    h2 { margin: 0; font-size: 16px; font-weight: 650; letter-spacing: 0; }
+    main { padding: 20px 28px 40px; display: grid; gap: 18px; }
+    section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
     code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; word-break: break-all; }
-    .tables { display: grid; grid-template-columns: minmax(0, 1fr); gap: 18px; }
-    .two { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 18px; }
-    form { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    button { padding: 9px 12px; border: 1px solid #1f5eff; background: #1f5eff; color: #fff; border-radius: 6px; font-weight: 650; cursor: pointer; }
+    button.secondary { border-color: #c7cfdb; background: #fff; color: var(--ink); }
     input { min-width: min(560px, 100%); flex: 1; padding: 9px 10px; border: 1px solid #c7cfdb; border-radius: 6px; font-size: 13px; }
-    button { padding: 9px 12px; border: 1px solid #1f5eff; background: #1f5eff; color: white; border-radius: 6px; font-weight: 650; cursor: pointer; }
-    button.secondary { border-color: #c7cfdb; background: #ffffff; color: #1d2430; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { padding: 9px 8px; border-bottom: 1px solid var(--soft-line); text-align: left; vertical-align: top; }
+    th { color: var(--muted); font-weight: 650; background: #fafbfc; }
+    .meta { margin-top: 6px; color: var(--muted); font-size: 13px; }
+    .section-head { display: flex; gap: 12px; align-items: center; justify-content: space-between; padding: 14px 16px; border-bottom: 1px solid var(--soft-line); }
+    .submit-section { padding: 14px 16px; }
+    .submit-section form { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    .status-strip { display: flex; gap: 8px; flex-wrap: wrap; }
+    .status-pill { display: inline-flex; gap: 7px; align-items: center; padding: 5px 9px; border: 1px solid var(--line); border-radius: 999px; background: #fff; color: var(--muted); font-size: 12px; }
+    .status-pill strong { color: var(--ink); font-size: 13px; }
+    .flow-board { padding: 0; }
+    .flow-wrap { overflow-x: auto; background: linear-gradient(#fff, #fbfcfd); }
+    .flow-graph { display: block; width: 100%; min-width: 0; height: auto; max-height: 520px; }
+    .flow-title { font-size: 15px; font-weight: 700; fill: var(--ink); }
+    .flow-subtitle { font-size: 12px; fill: var(--muted); }
+    .flow-small { font-size: 11px; fill: var(--muted); }
+    .arrow { fill: none; stroke: var(--red); stroke-width: 2.1; marker-end: url(#arrow); }
+    .arrow.soft { stroke-dasharray: 5 6; opacity: 0.75; }
+    .arrow.green { stroke: var(--green); }
+    .flow-node { cursor: pointer; outline: none; }
+    .flow-node .node-shape { fill: #fff; stroke-width: 2; transition: filter 120ms ease, stroke-width 120ms ease; }
+    .flow-node:hover .node-shape,
+    .flow-node.selected .node-shape { filter: drop-shadow(0 5px 10px rgba(31, 41, 55, 0.14)); stroke-width: 3; }
+    .kind-input .node-shape { stroke: var(--red); }
+    .kind-chunk .node-shape { stroke: #303746; }
+    .kind-gate .node-shape { stroke: var(--blue); }
+    .kind-model .node-shape { stroke: var(--orange); stroke-dasharray: 3 4; }
+    .kind-work .node-shape { stroke: var(--green); }
+    .kind-db .node-shape { stroke: var(--red); }
+    .kind-terminal .node-shape { stroke: var(--slate); }
+    .kind-failed .node-shape { stroke: var(--red); }
+    .count-badge .badge-bg { fill: #eef2f7; stroke: #cbd3df; stroke-width: 1; }
+    .count-badge .badge-text { fill: var(--ink); font-size: 14px; font-weight: 800; text-anchor: middle; dominant-baseline: middle; }
+    .count-badge.active .badge-bg { fill: #fff7ed; stroke: var(--orange); }
+    .count-badge.running .badge-bg { fill: #eff6ff; stroke: var(--blue); }
+    .count-badge.failed .badge-bg { fill: #fff1f2; stroke: var(--red); }
+    .node-inspector { display: grid; grid-template-columns: minmax(180px, 0.8fr) minmax(240px, 1.4fr); gap: 14px; padding: 14px 16px; border-top: 1px solid var(--soft-line); }
+    .inspector-title { font-weight: 700; font-size: 15px; }
+    .inspector-kind { color: var(--muted); font-size: 12px; margin-top: 3px; }
+    .inspector-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 8px; }
+    .metric { border: 1px solid var(--line); border-radius: 7px; padding: 8px 9px; background: #fbfcfd; min-height: 58px; }
+    .metric span { display: block; color: var(--muted); font-size: 11px; text-transform: uppercase; }
+    .metric strong { display: block; margin-top: 3px; font-size: 21px; line-height: 1; }
+    .tables { display: grid; grid-template-columns: minmax(0, 1fr); gap: 18px; }
+    .table-section { padding: 16px; }
+    .two { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 18px; }
     .status-failed { color: #c53232; font-weight: 650; }
     .status-complete, .status-completed { color: #18733f; font-weight: 650; }
     .status-running { color: #9a5a00; font-weight: 650; }
-    @media (max-width: 720px) { body { min-width: 360px; } main, header { padding-left: 14px; padding-right: 14px; } }
+    @media (max-width: 720px) {
+      body { min-width: 360px; }
+      main, header { padding-left: 14px; padding-right: 14px; }
+      .section-head { align-items: flex-start; flex-direction: column; }
+      .node-inspector { grid-template-columns: 1fr; }
+    }
   </style>
 </head>
 <body>
@@ -1000,8 +1054,7 @@ DASHBOARD_HTML = """<!doctype html>
     <div class="meta" id="meta">Loading...</div>
   </header>
   <main>
-    <section>
-      <h2>Submit Job</h2>
+    <section class="submit-section">
       <form id="job-form">
         <input id="audio-path" placeholder="/workspace/data/example.mp3" required>
         <input id="prompt" placeholder="Optional Audio Flamingo prompt">
@@ -1009,60 +1062,294 @@ DASHBOARD_HTML = """<!doctype html>
       </form>
     </section>
 
-    <div class="grid" id="summary"></div>
+    <section class="flow-board">
+      <div class="section-head">
+        <h2>Pipeline Graph</h2>
+        <div class="status-strip" id="summary"></div>
+      </div>
+      <div class="flow-wrap">
+        <svg id="flow-graph" class="flow-graph" viewBox="0 0 1052 404" role="img" aria-label="Pipeline status graph">
+          <defs>
+            <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+              <path d="M0,0 L0,6 L9,3 z" fill="#ef4444"></path>
+            </marker>
+          </defs>
+
+          <g transform="scale(0.72)">
+          <path class="arrow" d="M105 276 C132 276 142 276 165 276"></path>
+          <path class="arrow" d="M315 276 C336 276 350 276 371 276"></path>
+          <path class="arrow" d="M496 276 C525 276 540 246 578 246"></path>
+          <path class="arrow soft" d="M444 356 C520 432 822 444 1042 444"></path>
+          <path class="arrow" d="M744 246 C783 246 804 276 838 276"></path>
+          <path class="arrow green" d="M1004 276 C1042 256 1062 220 1096 188"></path>
+          <path class="arrow soft" d="M1004 305 C1098 350 1166 404 1252 426"></path>
+          <path class="arrow soft" d="M693 310 C814 414 1042 482 1252 466"></path>
+          <path class="arrow soft" d="M432 196 C518 72 890 80 1098 134"></path>
+
+          <g class="flow-node kind-input selected" tabindex="0" data-node="source">
+            <rect class="node-shape" x="34" y="220" width="72" height="112" rx="14"></rect>
+            <text class="flow-title" x="70" y="265" text-anchor="middle">Audio</text>
+            <text class="flow-title" x="70" y="286" text-anchor="middle">track</text>
+            <g class="count-badge" data-badge="source" transform="translate(108 216)"><rect class="badge-bg" x="-18" y="-15" width="36" height="30" rx="15"></rect><text class="badge-text">0</text></g>
+          </g>
+
+          <g class="flow-node kind-chunk" tabindex="0" data-node="chunks">
+            <rect class="node-shape" x="165" y="216" width="150" height="120" rx="13"></rect>
+            <text class="flow-title" x="240" y="268" text-anchor="middle">30s chunks</text>
+            <text class="flow-subtitle" x="240" y="292" text-anchor="middle">5s overlap</text>
+            <g class="count-badge" data-badge="chunks" transform="translate(316 212)"><rect class="badge-bg" x="-18" y="-15" width="36" height="30" rx="15"></rect><text class="badge-text">0</text></g>
+          </g>
+
+          <g class="flow-node kind-gate" tabindex="0" data-node="sound_gate">
+            <polygon class="node-shape" points="432,184 496,276 432,368 368,276"></polygon>
+            <text class="flow-title" x="432" y="258" text-anchor="middle">sound</text>
+            <text class="flow-title" x="432" y="278" text-anchor="middle">gate</text>
+            <text class="flow-subtitle" x="432" y="299" text-anchor="middle">filter</text>
+            <text class="flow-small" data-node-meta="sound_gate" x="432" y="392" text-anchor="middle">waiting 0</text>
+            <g class="count-badge" data-badge="sound_gate" transform="translate(493 204)"><rect class="badge-bg" x="-18" y="-15" width="36" height="30" rx="15"></rect><text class="badge-text">0</text></g>
+          </g>
+
+          <g class="flow-node kind-model" tabindex="0" data-node="describe_sfx">
+            <rect class="node-shape" x="578" y="194" width="166" height="104" rx="12"></rect>
+            <text class="flow-title" x="661" y="234" text-anchor="middle">describe SFX</text>
+            <text class="flow-subtitle" x="661" y="262" text-anchor="middle">audio_flamingo</text>
+            <text class="flow-small" data-node-meta="describe_sfx" x="661" y="316" text-anchor="middle">waiting 0</text>
+            <g class="count-badge" data-badge="describe_sfx" transform="translate(745 190)"><rect class="badge-bg" x="-18" y="-15" width="36" height="30" rx="15"></rect><text class="badge-text">0</text></g>
+          </g>
+
+          <g class="flow-node kind-work" tabindex="0" data-node="separate_sfx">
+            <rect class="node-shape" x="838" y="216" width="166" height="120" rx="12"></rect>
+            <text class="flow-title" x="921" y="268" text-anchor="middle">separate SFX</text>
+            <text class="flow-subtitle" x="921" y="294" text-anchor="middle">sam_audio</text>
+            <text class="flow-small" data-node-meta="separate_sfx" x="921" y="358" text-anchor="middle">waiting 0</text>
+            <g class="count-badge" data-badge="separate_sfx" transform="translate(1005 212)"><rect class="badge-bg" x="-18" y="-15" width="36" height="30" rx="15"></rect><text class="badge-text">0</text></g>
+          </g>
+
+          <g class="flow-node kind-db" tabindex="0" data-node="stems_db">
+            <circle class="node-shape" cx="1166" cy="158" r="78"></circle>
+            <text class="flow-title" x="1166" y="128" text-anchor="middle">STEMS</text>
+            <text class="flow-title" x="1166" y="150" text-anchor="middle">DB</text>
+            <text class="flow-subtitle" x="1166" y="178" text-anchor="middle">target + residual</text>
+            <text class="flow-subtitle" x="1166" y="199" text-anchor="middle">refs</text>
+            <g class="count-badge" data-badge="stems_db" transform="translate(1238 100)"><rect class="badge-bg" x="-18" y="-15" width="36" height="30" rx="15"></rect><text class="badge-text">0</text></g>
+          </g>
+
+          <g class="flow-node kind-terminal" tabindex="0" data-node="skipped_silent">
+            <rect class="node-shape" x="1042" y="402" width="152" height="84" rx="12"></rect>
+            <text class="flow-title" x="1118" y="438" text-anchor="middle">skipped</text>
+            <text class="flow-subtitle" x="1118" y="462" text-anchor="middle">silent chunk</text>
+            <g class="count-badge" data-badge="skipped_silent" transform="translate(1195 398)"><rect class="badge-bg" x="-18" y="-15" width="36" height="30" rx="15"></rect><text class="badge-text">0</text></g>
+          </g>
+
+          <g class="flow-node kind-failed" tabindex="0" data-node="failed">
+            <rect class="node-shape" x="1252" y="410" width="132" height="82" rx="12"></rect>
+            <text class="flow-title" x="1318" y="447" text-anchor="middle">failed</text>
+            <text class="flow-subtitle" x="1318" y="470" text-anchor="middle">retryable</text>
+            <g class="count-badge" data-badge="failed" transform="translate(1385 406)"><rect class="badge-bg" x="-18" y="-15" width="36" height="30" rx="15"></rect><text class="badge-text">0</text></g>
+          </g>
+          </g>
+        </svg>
+      </div>
+      <div id="node-inspector" class="node-inspector"></div>
+    </section>
 
     <div class="two">
-      <section>
+      <section class="table-section">
         <h2>Stages</h2>
         <table id="stages"></table>
       </section>
-      <section>
+      <section class="table-section">
         <h2>Queues</h2>
         <table id="queues"></table>
       </section>
     </div>
 
     <div class="tables">
-      <section>
+      <section class="table-section">
         <h2>Recent Jobs</h2>
         <table id="jobs"></table>
       </section>
-      <section>
+      <section class="table-section">
         <h2>Recent Failures</h2>
         <table id="failures"></table>
       </section>
-      <section>
+      <section class="table-section">
         <h2>Recent Outputs</h2>
         <table id="outputs"></table>
       </section>
     </div>
   </main>
   <script>
+    const FLOW_NODES = {
+      source: { title: 'Audio Track', kind: 'Input', badge: 'jobs' },
+      chunks: { title: 'Chunk Splitter', kind: 'Preprocess', badge: 'chunks' },
+      sound_gate: { title: 'Sound Gate Filter', kind: 'Queue: sound_gate', badge: 'waiting' },
+      describe_sfx: { title: 'Describe SFX', kind: 'Queue: audio_flamingo', badge: 'waiting' },
+      separate_sfx: { title: 'Separate SFX', kind: 'Queue: sam_audio', badge: 'waiting' },
+      stems_db: { title: 'Stems DB', kind: 'Output refs', badge: 'stems' },
+      skipped_silent: { title: 'Skipped Silent', kind: 'Terminal stage', badge: 'chunks' },
+      failed: { title: 'Failed', kind: 'Retryable work', badge: 'failures' },
+    };
+    let selectedNode = 'source';
+    let latestData = null;
+
     const statusClass = value => `status-${String(value || '').replaceAll('_', '-')}`;
     const esc = value => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
     const link = ref => ref && ref.url ? `<a href="${esc(ref.url)}"><code>${esc(ref.path)}</code></a>` : (ref && ref.path ? `<code>${esc(ref.path)}</code>` : '');
+    const queue = (data, name) => data.queues[name] || { pending: 0, running: 0, failed: 0, completed: 0 };
+    const number = value => Number(value || 0);
+
     function rows(headers, items, cells) {
       return `<thead><tr>${headers.map(h => `<th>${h}</th>`).join('')}</tr></thead><tbody>${items.map(item => `<tr>${cells(item).join('')}</tr>`).join('') || `<tr><td colspan="${headers.length}">No rows</td></tr>`}</tbody>`;
     }
-    async function refresh() {
-      const data = await fetch('/api/dashboard').then(r => r.json());
-      document.getElementById('meta').textContent = `backend=${data.backend} db=${data.db_path}`;
-      const cards = [
-        ['Jobs', data.totals.jobs], ['Chunks', data.totals.chunks],
-        ['Pending', data.tasks.pending], ['Running', data.tasks.running],
-        ['Failed', data.tasks.failed], ['Completed', data.tasks.completed],
-      ];
-      document.getElementById('summary').innerHTML = cards.map(([label, value]) => `<div class="card"><div class="label">${label}</div><div class="value">${value || 0}</div></div>`).join('');
+
+    function flowStats(data) {
+      const soundGate = queue(data, 'sound_gate');
+      const audioFlamingo = queue(data, 'audio_flamingo');
+      const samAudio = queue(data, 'sam_audio');
+      return {
+        source: {
+          badge: number(data.totals.jobs),
+          metrics: [['Jobs', data.totals.jobs], ['Queued tasks', data.tasks.pending], ['Running tasks', data.tasks.running]],
+        },
+        chunks: {
+          badge: number(data.totals.chunks),
+          metrics: [['Chunks', data.totals.chunks], ['Complete', data.stages.complete], ['Failed', data.stages.failed]],
+        },
+        sound_gate: {
+          badge: number(soundGate.pending),
+          waiting: number(soundGate.pending),
+          running: number(soundGate.running),
+          failed: number(soundGate.failed),
+          done: number(soundGate.completed),
+          metrics: [['Waiting', soundGate.pending], ['Running', soundGate.running], ['Done', soundGate.completed], ['Failed', soundGate.failed]],
+        },
+        describe_sfx: {
+          badge: number(audioFlamingo.pending),
+          waiting: number(audioFlamingo.pending),
+          running: number(audioFlamingo.running),
+          failed: number(audioFlamingo.failed),
+          done: number(audioFlamingo.completed),
+          metrics: [['Waiting', audioFlamingo.pending], ['Running', audioFlamingo.running], ['Done', audioFlamingo.completed], ['Failed', audioFlamingo.failed]],
+        },
+        separate_sfx: {
+          badge: number(samAudio.pending),
+          waiting: number(samAudio.pending),
+          running: number(samAudio.running),
+          failed: number(samAudio.failed),
+          done: number(samAudio.completed),
+          metrics: [['Waiting', samAudio.pending], ['Running', samAudio.running], ['Done', samAudio.completed], ['Failed', samAudio.failed]],
+        },
+        stems_db: {
+          badge: number(data.totals.stems),
+          metrics: [['Stem rows', data.totals.stems], ['Recent outputs', data.recent_outputs.length], ['Complete chunks', data.stages.complete]],
+        },
+        skipped_silent: {
+          badge: number(data.stages.skipped_silent),
+          metrics: [['Silent chunks', data.stages.skipped_silent], ['All chunks', data.totals.chunks]],
+        },
+        failed: {
+          badge: number(data.tasks.failed),
+          failed: number(data.tasks.failed),
+          metrics: [['Failed tasks', data.tasks.failed], ['Failed chunks', data.stages.failed], ['Recent failures', data.recent_failures.length]],
+        },
+      };
+    }
+
+    function setBadge(name, value, variant) {
+      const badge = document.querySelector(`[data-badge="${name}"]`);
+      if (!badge) return;
+      const text = badge.querySelector('text');
+      const rect = badge.querySelector('rect');
+      const display = String(value || 0);
+      const width = Math.max(36, display.length * 10 + 22);
+      text.textContent = display;
+      rect.setAttribute('x', String(-width / 2));
+      rect.setAttribute('width', String(width));
+      badge.classList.toggle('active', number(value) > 0);
+      badge.classList.toggle('running', variant === 'running');
+      badge.classList.toggle('failed', variant === 'failed');
+    }
+
+    function renderGraph(data) {
+      const stats = flowStats(data);
+      Object.entries(stats).forEach(([name, values]) => {
+        const variant = values.failed ? 'failed' : values.running ? 'running' : '';
+        setBadge(name, values.badge, variant);
+        const meta = document.querySelector(`[data-node-meta="${name}"]`);
+        if (meta) {
+          meta.textContent = `waiting ${values.waiting || 0} · running ${values.running || 0}`;
+        }
+      });
+      document.querySelectorAll('.flow-node').forEach(node => {
+        node.classList.toggle('selected', node.dataset.node === selectedNode);
+      });
+      renderInspector(data);
+    }
+
+    function renderInspector(data) {
+      const stats = flowStats(data);
+      const node = FLOW_NODES[selectedNode] || FLOW_NODES.source;
+      const values = stats[selectedNode] || stats.source;
+      const metrics = values.metrics || [];
+      document.getElementById('node-inspector').innerHTML = `
+        <div>
+          <div class="inspector-title">${esc(node.title)}</div>
+          <div class="inspector-kind">${esc(node.kind)}</div>
+        </div>
+        <div class="inspector-grid">
+          ${metrics.map(([label, value]) => `<div class="metric"><span>${esc(label)}</span><strong>${value || 0}</strong></div>`).join('')}
+        </div>`;
+    }
+
+    function renderTables(data) {
       document.getElementById('stages').innerHTML = rows(['Stage', 'Chunks'], Object.entries(data.stages), ([stage, count]) => [`<td><code>${esc(stage)}</code></td>`, `<td>${count}</td>`]);
       document.getElementById('queues').innerHTML = rows(['Queue', 'Pending', 'Running', 'Failed', 'Completed'], Object.entries(data.queues), ([q, c]) => [`<td><code>${esc(q)}</code></td>`, `<td>${c.pending || 0}</td>`, `<td>${c.running || 0}</td>`, `<td>${c.failed || 0}</td>`, `<td>${c.completed || 0}</td>`]);
       document.getElementById('jobs').innerHTML = rows(['Job', 'Status', 'Chunks', 'Source', 'Updated'], data.recent_jobs, j => [`<td><code>${esc(j.id)}</code></td>`, `<td class="${statusClass(j.status)}">${esc(j.status)}</td>`, `<td>${j.complete_chunks || 0}/${j.chunk_count || 0}</td>`, `<td><code>${esc(j.source_audio_path)}</code></td>`, `<td>${esc(j.updated_at)}</td>`]);
       document.getElementById('failures').innerHTML = rows(['Task', 'Queue', 'Chunk', 'Error', 'Retry'], data.recent_failures, f => [`<td><code>${esc(f.id)}</code></td>`, `<td><code>${esc(f.queue)}</code></td>`, `<td>${esc(f.chunk_index)}</td>`, `<td>${esc(f.error)}</td>`, `<td><button class="secondary" onclick="retryTask('${esc(f.id)}')">Retry</button></td>`]);
       document.getElementById('outputs').innerHTML = rows(['Chunk', 'Prompt', 'Target', 'Residual', 'Zip'], data.recent_outputs, o => [`<td>${esc(o.chunk_index)}</td>`, `<td>${esc(o.prompt)}</td>`, `<td>${link(o.target.wav || o.target.mp3)}</td>`, `<td>${link(o.residual.wav || o.residual.mp3)}</td>`, `<td>${link(o.zip)}</td>`]);
     }
+
+    function renderSummary(data) {
+      const pills = [
+        ['Jobs', data.totals.jobs],
+        ['Chunks', data.totals.chunks],
+        ['Pending', data.tasks.pending],
+        ['Running', data.tasks.running],
+        ['Failed', data.tasks.failed],
+        ['Completed', data.tasks.completed],
+      ];
+      document.getElementById('summary').innerHTML = pills.map(([label, value]) => `<span class="status-pill">${esc(label)} <strong>${value || 0}</strong></span>`).join('');
+    }
+
+    async function refresh() {
+      const data = await fetch('/api/dashboard').then(r => r.json());
+      latestData = data;
+      document.getElementById('meta').textContent = `backend=${data.backend} db=${data.db_path}`;
+      renderSummary(data);
+      renderGraph(data);
+      renderTables(data);
+    }
+
     async function retryTask(id) {
       await fetch(`/api/tasks/${id}/retry`, { method: 'POST' });
       refresh();
     }
+
+    document.querySelectorAll('.flow-node').forEach(node => {
+      const activate = () => {
+        selectedNode = node.dataset.node || 'source';
+        if (latestData) renderGraph(latestData);
+      };
+      node.addEventListener('click', activate);
+      node.addEventListener('keydown', event => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          activate();
+        }
+      });
+    });
+
     document.getElementById('job-form').addEventListener('submit', async event => {
       event.preventDefault();
       const audioPath = document.getElementById('audio-path').value;

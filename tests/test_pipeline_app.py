@@ -45,7 +45,9 @@ def test_dashboard_summary_initializes_schema(tmp_path: Path) -> None:
 
     assert response.status_code == 200
     data = response.json()
-    assert data["totals"] == {"jobs": 0, "chunks": 0}
+    assert data["totals"]["jobs"] == 0
+    assert data["totals"]["chunks"] == 0
+    assert data["totals"]["stems"] == 0
     assert data["queues"]["sound_gate"]["pending"] == 0
     assert data["stages"]["sound_gate"] == 0
 
@@ -74,6 +76,7 @@ def test_mock_pipeline_e2e_creates_target_and_residual_outputs(tmp_path: Path) -
     assert Path(stem["residual"]["wav"]["path"]).is_file()
     assert Path(stem["zip"]["path"]).is_file()
     assert dashboard["tasks"]["completed"] >= 3
+    assert dashboard["totals"]["stems"] == len(detail["stems"])
     assert dashboard["recent_outputs"][0]["prompt"] == "horse hooves"
 
 
