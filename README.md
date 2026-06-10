@@ -37,6 +37,7 @@ The script:
 - installs all OS and Python dependencies;
 - creates separate venvs for both model stacks;
 - starts both FastAPI services;
+- downloads and loads both models by default;
 - prints `[done]` for steps already complete.
 
 `facebook/sam-audio-large` is gated, so `HF_TOKEN` must belong to a Hugging Face
@@ -51,10 +52,10 @@ REPO_REF=main
 LOAD_MODELS=1
 ```
 
-To download and load model weights during bootstrap:
+To skip model loading during bootstrap and let models lazy-load on first request:
 
 ```bash
-LOAD_MODELS=1 bash <(curl -fsSL https://raw.githubusercontent.com/qforge-dev/qlabeler/main/scripts/bootstrap_runpod.sh)
+LOAD_MODELS=0 bash <(curl -fsSL https://raw.githubusercontent.com/qforge-dev/qlabeler/main/scripts/bootstrap_runpod.sh)
 ```
 
 ## Manual Setup From An Existing Checkout
@@ -115,7 +116,8 @@ curl http://127.0.0.1:8001/readyz
 curl http://127.0.0.1:8002/readyz
 ```
 
-Models lazy-load on first inference. To preload explicitly:
+Models load during bootstrap by default. If you started with `LOAD_MODELS=0`,
+load them explicitly later:
 
 ```bash
 ./scripts/setup_model_apis.sh load

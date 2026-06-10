@@ -30,7 +30,7 @@ AFNEXT_MODEL_ID="${AFNEXT_MODEL_ID:-nvidia/audio-flamingo-next-think-hf}"
 SAM_AUDIO_MODEL_ID="${SAM_AUDIO_MODEL_ID:-facebook/sam-audio-large}"
 
 PYTORCH_INDEX_URL="${PYTORCH_INDEX_URL:-https://download.pytorch.org/whl/cu124}"
-LOAD_MODELS="${LOAD_MODELS:-${RUNPOD_LOAD_MODELS:-0}}"
+LOAD_MODELS="${LOAD_MODELS:-${RUNPOD_LOAD_MODELS:-1}}"
 REQUIRE_CUDA="${REQUIRE_CUDA:-1}"
 
 AFNEXT_VENV="$VENV_DIR/audio-flamingo-next"
