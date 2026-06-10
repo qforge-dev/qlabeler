@@ -11,42 +11,59 @@ The two services run in separate Python virtual environments. This avoids the
 dependency conflicts that showed up when both model stacks were installed into
 one notebook runtime.
 
-## Fresh Machine Setup
+## One-Shot Fresh RunPod Setup
 
-Use this path on a fresh RunPod or Ubuntu GPU machine.
+Use this path on a completely fresh RunPod or Ubuntu GPU machine after SSH.
 
-1. Clone the repo and enter it:
-
-   ```bash
-   cd /workspace
-   git clone <this-repo-url> qlabeler-simpler
-   cd /workspace/qlabeler-simpler
-   ```
-
-2. Create `.env` and add your Hugging Face token:
-
-   ```bash
-   cp .env.example .env
-   nano .env
-   ```
-
-   `facebook/sam-audio-large` is gated, so `HF_TOKEN` must belong to a Hugging
-   Face account with access to that model.
-
-3. Bootstrap everything:
-
-   ```bash
-   ./scripts/setup_model_apis.sh bootstrap
-   ```
-
-That single command installs OS packages, creates two isolated virtual
-environments, installs model dependencies, patches the SAM-Audio loader to use
-`torchaudio`, and starts both FastAPI services.
-
-To download and load model weights during setup, set this in `.env` or inline:
+Run the bootstrap script and provide your repo URL:
 
 ```bash
-LOAD_MODELS=1 ./scripts/setup_model_apis.sh bootstrap
+REPO_URL=<your-git-repo-url> \
+  bash <(curl -fsSL https://raw.githubusercontent.com/<owner>/<repo>/main/scripts/bootstrap_runpod.sh)
+```
+
+If you copied `scripts/bootstrap_runpod.sh` onto the pod manually:
+
+```bash
+REPO_URL=<your-git-repo-url> bash bootstrap_runpod.sh
+```
+
+The script:
+
+- installs clone prerequisites if missing;
+- clones or updates the repo at `/workspace/qlabeler-simpler`;
+- prompts securely for `HF_TOKEN` when `.env` does not already contain one;
+- writes `.env`;
+- installs all OS and Python dependencies;
+- creates separate venvs for both model stacks;
+- starts both FastAPI services;
+- prints `[done]` for steps already complete.
+
+`facebook/sam-audio-large` is gated, so `HF_TOKEN` must belong to a Hugging Face
+account with access to that model.
+
+Useful bootstrap overrides:
+
+```bash
+REPO_DIR=/workspace/qlabeler-simpler
+REPO_REF=main
+LOAD_MODELS=1
+```
+
+To download and load model weights during bootstrap:
+
+```bash
+REPO_URL=<your-git-repo-url> LOAD_MODELS=1 \
+  bash <(curl -fsSL https://raw.githubusercontent.com/<owner>/<repo>/main/scripts/bootstrap_runpod.sh)
+```
+
+## Manual Setup From An Existing Checkout
+
+If the repo is already cloned and `.env` already has `HF_TOKEN`, run:
+
+```bash
+cd /workspace/qlabeler-simpler
+./scripts/setup_model_apis.sh bootstrap
 ```
 
 ## Service Commands
