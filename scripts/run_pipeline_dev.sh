@@ -33,6 +33,7 @@ log "Installing local pipeline dependencies"
   fastapi \
   audioop-lts \
   pydub \
+  python-multipart \
   "uvicorn[standard]"
 
 mkdir -p "$WORKSPACE_DIR" "$OUTPUT_DIR"

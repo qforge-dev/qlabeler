@@ -96,12 +96,11 @@ Mock behavior:
 - Audio Flamingo returns deterministic mock sources and `SAM_PROMPT: horse hooves`;
 - SAM-Audio copies the chunk into target/residual mock files.
 
-Submit a local audio file from the dashboard or with:
+Submit an audio file from the dashboard file picker, or with:
 
 ```bash
-curl -X POST http://127.0.0.1:8000/api/jobs \
-  -H 'Content-Type: application/json' \
-  -d '{"audio_path": "/absolute/path/to/audio.mp3"}'
+curl -X POST http://127.0.0.1:8000/api/jobs/upload \
+  -F audio_file=@/absolute/path/to/audio.mp3
 ```
 
 ## Service Commands
@@ -173,21 +172,30 @@ Dashboard:
 GET /
 ```
 
-Queue a source audio file. The pipeline splits it into 30-second chunks with
-5-second overlap, runs sound gate, asks Audio Flamingo for one SAM target prompt,
-then runs SAM-Audio separation.
+Queue a source audio file. The dashboard uses file upload and stores the source
+under pipeline artifacts before splitting it into 30-second chunks with
+5-second overlap, running sound gate, asking Audio Flamingo for one SAM target
+prompt, then running SAM-Audio separation.
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/jobs/upload \
+  -F audio_file=@/workspace/data/source.mp3 \
+  -F 'prompt=Identify sound effects and choose one target.'
+```
+
+For automation that already has a file on the same machine, the local-path JSON
+endpoint remains available:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/api/jobs \
   -H 'Content-Type: application/json' \
-  -d '{
-    "audio_path": "/workspace/data/source.mp3"
-  }'
+  -d '{"audio_path": "/workspace/data/source.mp3"}'
 ```
 
 Monitoring endpoints:
 
 ```text
+POST /api/jobs/upload
 GET /api/dashboard
 GET /api/jobs/{job_id}
 POST /api/tasks/{task_id}/retry

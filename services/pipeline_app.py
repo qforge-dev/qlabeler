@@ -17,7 +17,7 @@ from typing import Any
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -76,6 +76,13 @@ def json_loads(value: str | None, default: Any = None) -> Any:
 def clean_prefix(value: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", value.strip()).strip("._-")
     return cleaned[:96] or "pipeline"
+
+
+def clean_upload_name(filename: str | None) -> str:
+    source = Path(filename or "audio").name
+    stem = clean_prefix(Path(source).stem or "audio")
+    suffix = re.sub(r"[^A-Za-z0-9.]+", "", Path(source).suffix.lower())[:16]
+    return f"{new_id()}_{stem}{suffix}"
 
 
 def path_ref(path: str | None, output_dir: Path) -> dict[str, str] | None:
@@ -399,6 +406,24 @@ class PipelineRuntime:
             conn.execute("COMMIT")
 
         return self.job_detail(job_id)
+
+    def save_upload(self, upload: UploadFile) -> Path:
+        upload_dir = self.config.output_dir / "pipeline" / "uploads"
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        upload_path = upload_dir / clean_upload_name(upload.filename)
+
+        try:
+            upload.file.seek(0)
+            with upload_path.open("wb") as handle:
+                shutil.copyfileobj(upload.file, handle)
+        except Exception:
+            upload_path.unlink(missing_ok=True)
+            raise
+
+        if upload_path.stat().st_size <= 0:
+            upload_path.unlink(missing_ok=True)
+            raise ValueError("Uploaded audio file is empty.")
+        return upload_path
 
     def _insert_task(
         self,
@@ -991,6 +1016,7 @@ DASHBOARD_HTML = """<!doctype html>
     button { padding: 9px 12px; border: 1px solid #1f5eff; background: #1f5eff; color: #fff; border-radius: 6px; font-weight: 650; cursor: pointer; }
     button.secondary { border-color: #c7cfdb; background: #fff; color: var(--ink); }
     input { min-width: min(560px, 100%); flex: 1; padding: 9px 10px; border: 1px solid #c7cfdb; border-radius: 6px; font-size: 13px; }
+    input[type="file"] { background: #fff; }
     table { width: 100%; border-collapse: collapse; font-size: 13px; }
     th, td { padding: 9px 8px; border-bottom: 1px solid var(--soft-line); text-align: left; vertical-align: top; }
     th { color: var(--muted); font-weight: 650; background: #fafbfc; }
@@ -1056,7 +1082,7 @@ DASHBOARD_HTML = """<!doctype html>
   <main>
     <section class="submit-section">
       <form id="job-form">
-        <input id="audio-path" placeholder="/workspace/data/example.mp3" required>
+        <input id="audio-file" type="file" accept="audio/*,.mp3,.wav,.flac,.m4a" required>
         <input id="prompt" placeholder="Optional Audio Flamingo prompt">
         <button type="submit">Queue</button>
       </form>
@@ -1352,11 +1378,15 @@ DASHBOARD_HTML = """<!doctype html>
 
     document.getElementById('job-form').addEventListener('submit', async event => {
       event.preventDefault();
-      const audioPath = document.getElementById('audio-path').value;
+      const audioFile = document.getElementById('audio-file').files[0];
       const prompt = document.getElementById('prompt').value;
-      const response = await fetch('/api/jobs', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({audio_path: audioPath, prompt: prompt || null}) });
+      if (!audioFile) return;
+      const body = new FormData();
+      body.append('audio_file', audioFile);
+      if (prompt) body.append('prompt', prompt);
+      const response = await fetch('/api/jobs/upload', { method: 'POST', body });
       if (!response.ok) alert(await response.text());
-      document.getElementById('audio-path').value = '';
+      document.getElementById('audio-file').value = '';
       refresh();
     });
     refresh();
@@ -1409,6 +1439,19 @@ def create_app(config: PipelineConfig | None = None) -> FastAPI:
     def create_job(request: JobCreateRequest) -> dict[str, Any]:
         try:
             return runtime.create_job(request.audio_path, request.prompt)
+        except (FileNotFoundError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=exception_detail(exc)) from exc
+
+    @app.post("/api/jobs/upload")
+    def upload_job(
+        audio_file: UploadFile = File(...),
+        prompt: str | None = Form(default=None),
+    ) -> dict[str, Any]:
+        try:
+            uploaded_path = runtime.save_upload(audio_file)
+            return runtime.create_job(str(uploaded_path), prompt)
         except (FileNotFoundError, ValueError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except Exception as exc:

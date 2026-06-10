@@ -247,6 +247,7 @@ install_pipeline_env() {
     fastapi \
     audioop-lts \
     pydub \
+    python-multipart \
     "uvicorn[standard]"
 }
 

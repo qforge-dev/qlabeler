@@ -80,6 +80,33 @@ def test_mock_pipeline_e2e_creates_target_and_residual_outputs(tmp_path: Path) -
     assert dashboard["recent_outputs"][0]["prompt"] == "horse hooves"
 
 
+def test_uploaded_audio_job_is_persisted_and_processed(tmp_path: Path) -> None:
+    client, runtime = make_app(tmp_path)
+    audio_path = tmp_path / "tone_upload.wav"
+    write_tone(audio_path, seconds=1.0)
+
+    with client:
+        with audio_path.open("rb") as audio_file:
+            response = client.post(
+                "/api/jobs/upload",
+                data={"prompt": "List sounds and choose one target."},
+                files={"audio_file": ("tone_upload.wav", audio_file, "audio/wav")},
+            )
+        assert response.status_code == 200
+        job_id = response.json()["job"]["id"]
+
+        processed = runtime.process_until_idle(max_tasks=20)
+        assert processed >= 3
+
+        detail = client.get(f"/api/jobs/{job_id}").json()
+
+    source_path = Path(detail["job"]["source_audio_path"])
+    assert source_path.is_file()
+    assert source_path.parent.name == "uploads"
+    assert detail["job"]["status"] == "complete"
+    assert detail["stems"]
+
+
 def test_failed_task_can_be_retried(tmp_path: Path) -> None:
     client, runtime = make_app(tmp_path, backend="real")
     audio_path = tmp_path / "workspace" / "tone.wav"

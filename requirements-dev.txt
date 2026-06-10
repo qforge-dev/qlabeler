@@ -2,4 +2,5 @@ fastapi
 httpx2
 audioop-lts
 pydub
+python-multipart
 pytest
