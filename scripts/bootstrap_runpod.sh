@@ -16,7 +16,7 @@ Usage:
 
 This is the one-shot fresh RunPod bootstrap. It installs clone prerequisites,
 clones or updates the repo, prompts for HF_TOKEN when needed, writes .env, then
-installs and starts both model APIs.
+installs and starts the pipeline dashboard plus both model APIs.
 
 Environment:
   REPO_URL      Git URL to clone. Default: https://github.com/qforge-dev/qlabeler.git
@@ -218,19 +218,20 @@ api_health_ok() {
 venvs_ready() {
   local workspace_dir="${WORKSPACE_DIR:-/workspace}"
   local venv_dir="${VENV_DIR:-$workspace_dir/venvs}"
-  [[ -x "$venv_dir/audio-flamingo-next/bin/uvicorn" && -x "$venv_dir/sam-audio-large/bin/uvicorn" ]]
+  [[ -x "$venv_dir/pipeline/bin/uvicorn" && -x "$venv_dir/audio-flamingo-next/bin/uvicorn" && -x "$venv_dir/sam-audio-large/bin/uvicorn" ]]
 }
 
 bootstrap_or_start_services() {
-  log "Model APIs"
+  log "Pipeline and model APIs"
   chmod +x "$REPO_DIR/scripts/setup_model_apis.sh"
   load_env
 
+  local pipeline_port="${PIPELINE_PORT:-8000}"
   local af_port="${AFNEXT_PORT:-8001}"
   local sam_port="${SAM_AUDIO_PORT:-8002}"
 
-  if api_health_ok "$af_port" && api_health_ok "$sam_port"; then
-    done_step "both APIs are already healthy"
+  if api_health_ok "$pipeline_port" && api_health_ok "$af_port" && api_health_ok "$sam_port"; then
+    done_step "pipeline and model APIs are already healthy"
     ROOT_DIR="$REPO_DIR" "$REPO_DIR/scripts/setup_model_apis.sh" status
     return
   fi
@@ -254,10 +255,12 @@ Useful commands:
   cd $REPO_DIR
   ./scripts/setup_model_apis.sh status
   ./scripts/setup_model_apis.sh load
+  ./scripts/setup_model_apis.sh logs pipeline
   ./scripts/setup_model_apis.sh logs audio-flamingo-next
   ./scripts/setup_model_apis.sh logs sam-audio-large
 
 APIs:
+  Pipeline:       http://127.0.0.1:${PIPELINE_PORT:-8000}/
   Audio Flamingo: http://127.0.0.1:${AFNEXT_PORT:-8001}/v1/audio-flamingo/ask
   SAM-Audio:      http://127.0.0.1:${SAM_AUDIO_PORT:-8002}/v1/sam-audio/separate
 EOF

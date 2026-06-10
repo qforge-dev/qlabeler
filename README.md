@@ -1,15 +1,21 @@
 # Audio Model APIs
 
-This repo contains the original working notebooks plus production-style FastAPI
-wrappers for two audio models:
+This repo contains the original working notebooks plus a FastAPI pipeline
+dashboard and production-style FastAPI wrappers for two audio models:
 
 - `nvidia/audio-flamingo-next-think-hf` for audio question answering.
 - `facebook/sam-audio-large` for separating one described sound from a short
   audio clip.
 
-The two services run in separate Python virtual environments. This avoids the
-dependency conflicts that showed up when both model stacks were installed into
-one notebook runtime.
+The RunPod setup starts three services:
+
+- Pipeline dashboard/API on port `8000`.
+- Audio Flamingo model API on port `8001`.
+- SAM-Audio model API on port `8002`.
+
+The two model services run in separate Python virtual environments. The
+pipeline dashboard runs in a lightweight third environment and queues work in
+SQLite.
 
 ## One-Shot Fresh RunPod Setup
 
@@ -36,7 +42,7 @@ The script:
 - writes `.env`;
 - installs all OS and Python dependencies;
 - creates separate venvs for both model stacks;
-- starts both FastAPI services;
+- starts the pipeline dashboard and both FastAPI model services;
 - downloads and loads both models by default;
 - prints `[done]` for steps already complete.
 
@@ -67,9 +73,34 @@ cd /workspace/qlabeler
 ./scripts/setup_model_apis.sh bootstrap
 ```
 
+## Local Mock Development
+
+Use this on your Mac or any non-GPU development machine:
+
+```bash
+./scripts/run_pipeline_dev.sh
+```
+
+This starts only the pipeline dashboard/API on `http://127.0.0.1:8000` with
+`PIPELINE_BACKEND=mock`. It does not install or run the real model services.
+
+Mock behavior:
+
+- sound gate checks local audio duration/RMS;
+- Audio Flamingo returns deterministic mock sources and `SAM_PROMPT: horse hooves`;
+- SAM-Audio copies the chunk into target/residual mock files.
+
+Submit a local audio file from the dashboard or with:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/jobs \
+  -H 'Content-Type: application/json' \
+  -d '{"audio_path": "/absolute/path/to/audio.mp3"}'
+```
+
 ## Service Commands
 
-The setup script is also the service control script:
+The RunPod setup script is also the service control script:
 
 ```bash
 ./scripts/setup_model_apis.sh doctor
@@ -85,15 +116,18 @@ Default paths:
 
 ```text
 repo:       /workspace/qlabeler
+dashboard:  http://127.0.0.1:8000
 venvs:      /workspace/venvs
 outputs:    /workspace/outputs
 logs:       /workspace/logs/qlabeler
 HF cache:   /workspace/.cache/huggingface
+queue DB:   /workspace/pipeline.sqlite3
 ```
 
 Default ports:
 
 ```text
+Pipeline:       http://127.0.0.1:8000
 Audio Flamingo: http://127.0.0.1:8001
 SAM-Audio:      http://127.0.0.1:8002
 ```
@@ -105,6 +139,7 @@ All paths and ports can be changed in `.env`; see [.env.example](.env.example).
 Health checks confirm that the API process is running:
 
 ```bash
+curl http://127.0.0.1:8000/healthz
 curl http://127.0.0.1:8001/healthz
 curl http://127.0.0.1:8002/healthz
 ```
@@ -112,6 +147,7 @@ curl http://127.0.0.1:8002/healthz
 Readiness shows whether model weights are loaded:
 
 ```bash
+curl http://127.0.0.1:8000/readyz
 curl http://127.0.0.1:8001/readyz
 curl http://127.0.0.1:8002/readyz
 ```
@@ -121,6 +157,45 @@ load them explicitly later:
 
 ```bash
 ./scripts/setup_model_apis.sh load
+```
+
+## Pipeline Dashboard API
+
+Dashboard:
+
+```text
+GET /
+```
+
+Queue a source audio file. The pipeline splits it into 30-second chunks with
+5-second overlap, runs sound gate, asks Audio Flamingo for one SAM target prompt,
+then runs SAM-Audio separation.
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/jobs \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "audio_path": "/workspace/data/source.mp3"
+  }'
+```
+
+Monitoring endpoints:
+
+```text
+GET /api/dashboard
+GET /api/jobs/{job_id}
+POST /api/tasks/{task_id}/retry
+```
+
+The dashboard shows job totals, chunk stage counts, queue depths, recent
+failures, and recent target/residual outputs.
+
+Local mock-compatible endpoints are also available from the pipeline service:
+
+```text
+POST /mock/sound-gate
+POST /mock/audio-flamingo/ask
+POST /mock/sam-audio/separate
 ```
 
 ## Audio Flamingo API

@@ -26,8 +26,12 @@ LOG_DIR="${LOG_DIR:-$WORKSPACE_DIR/logs/qlabeler}"
 
 AFNEXT_PORT="${AFNEXT_PORT:-8001}"
 SAM_AUDIO_PORT="${SAM_AUDIO_PORT:-8002}"
+PIPELINE_PORT="${PIPELINE_PORT:-8000}"
 AFNEXT_MODEL_ID="${AFNEXT_MODEL_ID:-nvidia/audio-flamingo-next-think-hf}"
 SAM_AUDIO_MODEL_ID="${SAM_AUDIO_MODEL_ID:-facebook/sam-audio-large}"
+PIPELINE_BACKEND="${PIPELINE_BACKEND:-real}"
+AFNEXT_ENDPOINT="${AFNEXT_ENDPOINT:-http://127.0.0.1:${AFNEXT_PORT}/v1/audio-flamingo/ask}"
+SAM_AUDIO_ENDPOINT="${SAM_AUDIO_ENDPOINT:-http://127.0.0.1:${SAM_AUDIO_PORT}/v1/sam-audio/separate}"
 
 PYTORCH_INDEX_URL="${PYTORCH_INDEX_URL:-https://download.pytorch.org/whl/cu124}"
 LOAD_MODELS="${LOAD_MODELS:-${RUNPOD_LOAD_MODELS:-1}}"
@@ -35,6 +39,7 @@ REQUIRE_CUDA="${REQUIRE_CUDA:-1}"
 
 AFNEXT_VENV="$VENV_DIR/audio-flamingo-next"
 SAM_AUDIO_VENV="$VENV_DIR/sam-audio-large"
+PIPELINE_VENV="$VENV_DIR/pipeline"
 
 log() {
   printf '\n== %s ==\n' "$*"
@@ -46,15 +51,15 @@ Usage:
   $0 [bootstrap|install|start|restart|stop|status|load|doctor|logs] [service]
 
 Commands:
-  bootstrap   Install system packages, create both venvs, start both APIs. Default.
+  bootstrap   Install system packages, create venvs, start all APIs. Default.
   install     Install system packages and Python dependencies only.
-  start       Start both FastAPI services from existing venvs.
-  restart     Stop, then start both services.
+  start       Start all FastAPI services from existing venvs.
+  restart     Stop, then start all services.
   stop        Stop services started by this script.
   status      Show health/readiness and local process ids.
   load        Call /load on both services to load model weights.
   doctor      Check common machine prerequisites.
-  logs        Tail logs. Optional service: audio-flamingo-next or sam-audio-large.
+  logs        Tail logs. Optional service: pipeline, audio-flamingo-next, or sam-audio-large.
 
 Environment:
   ROOT_DIR=$ROOT_DIR
@@ -64,6 +69,8 @@ Environment:
   LOG_DIR=$LOG_DIR
   AFNEXT_PORT=$AFNEXT_PORT
   SAM_AUDIO_PORT=$SAM_AUDIO_PORT
+  PIPELINE_PORT=$PIPELINE_PORT
+  PIPELINE_BACKEND=$PIPELINE_BACKEND
   PYTORCH_INDEX_URL=$PYTORCH_INDEX_URL
   LOAD_MODELS=$LOAD_MODELS
 
@@ -203,6 +210,7 @@ install_audio_flamingo_env() {
     fastapi \
     hf_transfer \
     librosa \
+    audioop-lts \
     pydub \
     soundfile \
     transformers \
@@ -227,6 +235,17 @@ install_sam_audio_env() {
     "transformers>=4.54,<5" \
     "huggingface_hub>=0.34,<1.0" \
     hf_transfer \
+    audioop-lts \
+    pydub \
+    "uvicorn[standard]"
+}
+
+install_pipeline_env() {
+  log "Installing pipeline environment"
+  create_venv "$PIPELINE_VENV"
+  "$PIPELINE_VENV/bin/python" -m pip install --upgrade \
+    fastapi \
+    audioop-lts \
     pydub \
     "uvicorn[standard]"
 }
@@ -237,6 +256,7 @@ install_all() {
   mkdir -p "$VENV_DIR" "$LOG_DIR" "$OUTPUT_DIR"
   install_audio_flamingo_env
   install_sam_audio_env
+  install_pipeline_env
 }
 
 pid_file_for() {
@@ -281,6 +301,7 @@ stop_service() {
 }
 
 stop_all() {
+  stop_service pipeline
   stop_service audio-flamingo-next
   stop_service sam-audio-large
 }
@@ -366,6 +387,16 @@ start_all() {
   if [[ "$LOAD_MODELS" == "1" ]]; then
     load_all
   fi
+  start_service \
+    pipeline \
+    "$PIPELINE_VENV" \
+    services.pipeline_app \
+    "$PIPELINE_PORT" \
+    PIPELINE_BACKEND="$PIPELINE_BACKEND" \
+    AFNEXT_ENDPOINT="$AFNEXT_ENDPOINT" \
+    SAM_AUDIO_ENDPOINT="$SAM_AUDIO_ENDPOINT"
+
+  wait_for_health pipeline "$PIPELINE_PORT"
   print_access_notes
 }
 
@@ -423,6 +454,7 @@ show_service_status() {
 }
 
 show_status() {
+  show_service_status pipeline "$PIPELINE_PORT"
   show_service_status audio-flamingo-next "$AFNEXT_PORT"
   show_service_status sam-audio-large "$SAM_AUDIO_PORT"
 }
@@ -431,9 +463,9 @@ show_logs() {
   local name="${1:-}"
   case "$name" in
     ""|"all")
-      tail -n 120 "$LOG_DIR/audio-flamingo-next.log" "$LOG_DIR/sam-audio-large.log"
+      tail -n 120 "$LOG_DIR/pipeline.log" "$LOG_DIR/audio-flamingo-next.log" "$LOG_DIR/sam-audio-large.log"
       ;;
-    "audio-flamingo-next"|"sam-audio-large")
+    "pipeline"|"audio-flamingo-next"|"sam-audio-large")
       tail -n 160 "$LOG_DIR/$name.log"
       ;;
     *)
@@ -453,8 +485,8 @@ doctor() {
   fi
 
   log "Paths"
-  printf 'ROOT_DIR=%s\nWORKSPACE_DIR=%s\nVENV_DIR=%s\nOUTPUT_DIR=%s\nLOG_DIR=%s\n' \
-    "$ROOT_DIR" "$WORKSPACE_DIR" "$VENV_DIR" "$OUTPUT_DIR" "$LOG_DIR"
+  printf 'ROOT_DIR=%s\nWORKSPACE_DIR=%s\nVENV_DIR=%s\nOUTPUT_DIR=%s\nLOG_DIR=%s\nPIPELINE_BACKEND=%s\n' \
+    "$ROOT_DIR" "$WORKSPACE_DIR" "$VENV_DIR" "$OUTPUT_DIR" "$LOG_DIR" "$PIPELINE_BACKEND"
 
   log "Python"
   command -v python3 || true
@@ -475,6 +507,12 @@ doctor() {
 print_access_notes() {
   log "Services running"
   cat <<EOF
+Pipeline Dashboard:
+  dashboard: http://127.0.0.1:${PIPELINE_PORT}/
+  api:       http://127.0.0.1:${PIPELINE_PORT}/api/dashboard
+  backend:   ${PIPELINE_BACKEND}
+  log:       ${LOG_DIR}/pipeline.log
+
 Audio Flamingo Next:
   health: http://127.0.0.1:${AFNEXT_PORT}/healthz
   ask:    POST http://127.0.0.1:${AFNEXT_PORT}/v1/audio-flamingo/ask
@@ -488,6 +526,7 @@ SAM-Audio Large:
 Useful commands:
   $0 status
   $0 load
+  $0 logs pipeline
   $0 logs audio-flamingo-next
   $0 logs sam-audio-large
 EOF
