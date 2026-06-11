@@ -42,6 +42,7 @@ log "Starting mock pipeline dashboard"
 cat <<EOF
 Dashboard: http://127.0.0.1:${PIPELINE_PORT}/
 Backend:   mock
+Storage:   local
 DB:        ${PIPELINE_DB_PATH}
 Outputs:   ${OUTPUT_DIR}
 EOF
@@ -53,5 +54,6 @@ exec env \
   OUTPUT_DIR="$OUTPUT_DIR" \
   PIPELINE_DB_PATH="$PIPELINE_DB_PATH" \
   PIPELINE_BACKEND=mock \
+  PIPELINE_STORAGE_BACKEND=local \
   PIPELINE_WORKER_ENABLED="${PIPELINE_WORKER_ENABLED:-1}" \
   "$PIPELINE_DEV_VENV/bin/uvicorn" services.pipeline_app:app --host 127.0.0.1 --port "$PIPELINE_PORT"

@@ -30,8 +30,15 @@ PIPELINE_PORT="${PIPELINE_PORT:-8000}"
 AFNEXT_MODEL_ID="${AFNEXT_MODEL_ID:-nvidia/audio-flamingo-next-think-hf}"
 SAM_AUDIO_MODEL_ID="${SAM_AUDIO_MODEL_ID:-facebook/sam-audio-large}"
 PIPELINE_BACKEND="${PIPELINE_BACKEND:-real}"
+PIPELINE_STORAGE_BACKEND="${PIPELINE_STORAGE_BACKEND:-local}"
 AFNEXT_ENDPOINT="${AFNEXT_ENDPOINT:-http://127.0.0.1:${AFNEXT_PORT}/v1/audio-flamingo/ask}"
 SAM_AUDIO_ENDPOINT="${SAM_AUDIO_ENDPOINT:-http://127.0.0.1:${SAM_AUDIO_PORT}/v1/sam-audio/separate}"
+S3_BUCKET="${S3_BUCKET:-}"
+S3_PREFIX="${S3_PREFIX:-qlabeler}"
+S3_REGION="${S3_REGION:-${AWS_REGION:-}}"
+S3_ENDPOINT_URL="${S3_ENDPOINT_URL:-}"
+S3_PUBLIC_BASE_URL="${S3_PUBLIC_BASE_URL:-}"
+S3_PRESIGN_SECONDS="${S3_PRESIGN_SECONDS:-0}"
 
 PYTORCH_INDEX_URL="${PYTORCH_INDEX_URL:-https://download.pytorch.org/whl/cu124}"
 LOAD_MODELS="${LOAD_MODELS:-${RUNPOD_LOAD_MODELS:-1}}"
@@ -71,6 +78,7 @@ Environment:
   SAM_AUDIO_PORT=$SAM_AUDIO_PORT
   PIPELINE_PORT=$PIPELINE_PORT
   PIPELINE_BACKEND=$PIPELINE_BACKEND
+  PIPELINE_STORAGE_BACKEND=$PIPELINE_STORAGE_BACKEND
   PYTORCH_INDEX_URL=$PYTORCH_INDEX_URL
   LOAD_MODELS=$LOAD_MODELS
 
@@ -246,6 +254,7 @@ install_pipeline_env() {
   "$PIPELINE_VENV/bin/python" -m pip install --upgrade \
     fastapi \
     audioop-lts \
+    boto3 \
     pydub \
     python-multipart \
     "uvicorn[standard]"
@@ -394,6 +403,13 @@ start_all() {
     services.pipeline_app \
     "$PIPELINE_PORT" \
     PIPELINE_BACKEND="$PIPELINE_BACKEND" \
+    PIPELINE_STORAGE_BACKEND="$PIPELINE_STORAGE_BACKEND" \
+    S3_BUCKET="$S3_BUCKET" \
+    S3_PREFIX="$S3_PREFIX" \
+    S3_REGION="$S3_REGION" \
+    S3_ENDPOINT_URL="$S3_ENDPOINT_URL" \
+    S3_PUBLIC_BASE_URL="$S3_PUBLIC_BASE_URL" \
+    S3_PRESIGN_SECONDS="$S3_PRESIGN_SECONDS" \
     AFNEXT_ENDPOINT="$AFNEXT_ENDPOINT" \
     SAM_AUDIO_ENDPOINT="$SAM_AUDIO_ENDPOINT"
 
@@ -486,8 +502,8 @@ doctor() {
   fi
 
   log "Paths"
-  printf 'ROOT_DIR=%s\nWORKSPACE_DIR=%s\nVENV_DIR=%s\nOUTPUT_DIR=%s\nLOG_DIR=%s\nPIPELINE_BACKEND=%s\n' \
-    "$ROOT_DIR" "$WORKSPACE_DIR" "$VENV_DIR" "$OUTPUT_DIR" "$LOG_DIR" "$PIPELINE_BACKEND"
+  printf 'ROOT_DIR=%s\nWORKSPACE_DIR=%s\nVENV_DIR=%s\nOUTPUT_DIR=%s\nLOG_DIR=%s\nPIPELINE_BACKEND=%s\nPIPELINE_STORAGE_BACKEND=%s\n' \
+    "$ROOT_DIR" "$WORKSPACE_DIR" "$VENV_DIR" "$OUTPUT_DIR" "$LOG_DIR" "$PIPELINE_BACKEND" "$PIPELINE_STORAGE_BACKEND"
 
   log "Python"
   command -v python3 || true
@@ -512,6 +528,7 @@ Pipeline Dashboard:
   dashboard: http://127.0.0.1:${PIPELINE_PORT}/
   api:       http://127.0.0.1:${PIPELINE_PORT}/api/dashboard
   backend:   ${PIPELINE_BACKEND}
+  storage:   ${PIPELINE_STORAGE_BACKEND}
   log:       ${LOG_DIR}/pipeline.log
 
 Audio Flamingo Next:

@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field
 from pydub import AudioSegment
 
 from services.common import OUTPUT_DIR, WORKSPACE_DIR, exception_detail, parse_bool, resolve_local_path
+from services.storage import ArtifactStorage, create_storage_adapter, local_file_ref
 
 
 TASK_SOUND_GATE = "sound_gate"
@@ -32,6 +33,29 @@ TASK_SAM_AUDIO = "sam_audio"
 TASK_QUEUES = (TASK_SOUND_GATE, TASK_AUDIO_FLAMINGO, TASK_SAM_AUDIO)
 
 STAGE_SOUND_GATE = "sound_gate"
+STAGE_DESCRIBE_SCENE = "describe_scene"
+STAGE_SEPARATE_MUSIC = "separate_music"
+STAGE_GATE_MUSIC = "gate_music"
+STAGE_GATE_SFX_VOICE = "gate_sfx_voice"
+STAGE_MUSIC_READY = "music_ready"
+STAGE_SFX_VOICE_READY = "sfx_voice_ready"
+STAGE_DESCRIBE_MUSIC = "describe_music"
+STAGE_MUSIC_DESCRIBED = "music_described"
+STAGE_SEPARATE_VOICES = "separate_voices"
+STAGE_GATE_VOICE = "gate_voice"
+STAGE_GATE_SFX = "gate_sfx"
+STAGE_TRANSCRIBE_VOICE = "transcribe_voice"
+STAGE_VOICE_TRANSCRIBED = "voice_transcribed"
+STAGE_SFX_READY = "sfx_ready"
+STAGE_LIST_SFX = "list_sfx"
+STAGE_GATE_REMAINING_SFX = "gate_remaining_sfx"
+STAGE_SFX_EXHAUSTED = "sfx_exhausted"
+STAGE_SFX_ITERATION_LIMIT = "sfx_iteration_limit"
+STAGE_SFX_LOOP_FAILED = "sfx_loop_failed"
+STAGE_SKIPPED_MUSIC = "skipped_music"
+STAGE_SKIPPED_SFX_VOICE = "skipped_sfx_voice"
+STAGE_SKIPPED_VOICE = "skipped_voice"
+STAGE_SKIPPED_SFX = "skipped_sfx"
 STAGE_DESCRIBE_SFX = "describe_sfx"
 STAGE_SEPARATE_SFX = "separate_sfx"
 STAGE_COMPLETE = "complete"
@@ -39,6 +63,29 @@ STAGE_SKIPPED_SILENT = "skipped_silent"
 STAGE_FAILED = "failed"
 STAGES = (
     STAGE_SOUND_GATE,
+    STAGE_DESCRIBE_SCENE,
+    STAGE_SEPARATE_MUSIC,
+    STAGE_GATE_MUSIC,
+    STAGE_GATE_SFX_VOICE,
+    STAGE_MUSIC_READY,
+    STAGE_SFX_VOICE_READY,
+    STAGE_DESCRIBE_MUSIC,
+    STAGE_MUSIC_DESCRIBED,
+    STAGE_SEPARATE_VOICES,
+    STAGE_GATE_VOICE,
+    STAGE_GATE_SFX,
+    STAGE_TRANSCRIBE_VOICE,
+    STAGE_VOICE_TRANSCRIBED,
+    STAGE_SFX_READY,
+    STAGE_LIST_SFX,
+    STAGE_GATE_REMAINING_SFX,
+    STAGE_SFX_EXHAUSTED,
+    STAGE_SFX_ITERATION_LIMIT,
+    STAGE_SFX_LOOP_FAILED,
+    STAGE_SKIPPED_MUSIC,
+    STAGE_SKIPPED_SFX_VOICE,
+    STAGE_SKIPPED_VOICE,
+    STAGE_SKIPPED_SFX,
     STAGE_DESCRIBE_SFX,
     STAGE_SEPARATE_SFX,
     STAGE_COMPLETE,
@@ -46,14 +93,60 @@ STAGES = (
     STAGE_FAILED,
 )
 
+PURPOSE_CHUNK_SOUND_GATE = "chunk_sound_gate"
+PURPOSE_DESCRIBE_SCENE = "describe_scene"
+PURPOSE_SEPARATE_MUSIC = "separate_music"
+PURPOSE_GATE_MUSIC = "gate_music"
+PURPOSE_GATE_SFX_VOICE = "gate_sfx_voice"
+PURPOSE_DESCRIBE_MUSIC = "describe_music"
+PURPOSE_SEPARATE_VOICES = "separate_voices"
+PURPOSE_GATE_VOICE = "gate_voice"
+PURPOSE_GATE_SFX = "gate_sfx"
+PURPOSE_TRANSCRIBE_VOICE = "transcribe_voice"
+PURPOSE_LIST_SFX = "list_sfx"
+PURPOSE_GATE_REMAINING_SFX = "gate_remaining_sfx"
+PURPOSE_DESCRIBE_SFX = "describe_sfx"
+PURPOSE_SEPARATE_SFX = "separate_sfx"
+PURPOSES = (
+    PURPOSE_DESCRIBE_SCENE,
+    PURPOSE_CHUNK_SOUND_GATE,
+    PURPOSE_SEPARATE_MUSIC,
+    PURPOSE_GATE_MUSIC,
+    PURPOSE_GATE_SFX_VOICE,
+    PURPOSE_DESCRIBE_MUSIC,
+    PURPOSE_SEPARATE_VOICES,
+    PURPOSE_GATE_VOICE,
+    PURPOSE_GATE_SFX,
+    PURPOSE_TRANSCRIBE_VOICE,
+    PURPOSE_LIST_SFX,
+    PURPOSE_GATE_REMAINING_SFX,
+    PURPOSE_DESCRIBE_SFX,
+    PURPOSE_SEPARATE_SFX,
+)
+
+ARTIFACT_SCENE_DESCRIPTION = "scene_description"
+ARTIFACT_MUSIC_TRACK = "music_track"
+ARTIFACT_SFX_VOICE_TRACK = "sfx_voice_track"
+ARTIFACT_MUSIC_DESCRIPTION = "music_description"
+ARTIFACT_VOICE_TRACK = "voice_track"
+ARTIFACT_SFX_TRACK = "sfx_track"
+ARTIFACT_VOICE_TRANSCRIPTION = "voice_transcription"
+ARTIFACT_SFX_LIST = "sfx_list"
+ARTIFACT_SFX_ISOLATED_TRACK = "sfx_isolated_track"
+ARTIFACT_SFX_REMAINING_TRACK = "sfx_remaining_track"
+ARTIFACT_SFX_LOOP_DEBUG = "sfx_loop_debug"
+ARTIFACT_SOUND_GATE = "sound_gate"
+
 STATUS_PENDING = "pending"
 STATUS_RUNNING = "running"
 STATUS_COMPLETED = "completed"
 STATUS_FAILED = "failed"
 
+SFX_LOOP_MAX_ITERATIONS = 8
+
 
 def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
 def new_id() -> str:
@@ -86,16 +179,7 @@ def clean_upload_name(filename: str | None) -> str:
 
 
 def path_ref(path: str | None, output_dir: Path) -> dict[str, str] | None:
-    if not path:
-        return None
-    resolved = Path(path).resolve()
-    ref = {"path": str(resolved)}
-    try:
-        relative = resolved.relative_to(output_dir.resolve())
-    except ValueError:
-        return ref
-    ref["url"] = f"/files/{relative.as_posix()}"
-    return ref
+    return local_file_ref(path, output_dir)
 
 
 def post_json(url: str, payload: dict[str, Any], *, timeout: float) -> dict[str, Any]:
@@ -138,17 +222,26 @@ class PipelineConfig:
     sound_gate_min_active_ms: int = 250
     sound_gate_min_active_ratio: float = 0.01
     request_timeout_seconds: float = 600.0
+    storage_backend: str = "local"
+    s3_bucket: str | None = None
+    s3_prefix: str = "qlabeler"
+    s3_region: str | None = None
+    s3_endpoint_url: str | None = None
+    s3_public_base_url: str | None = None
+    s3_presign_seconds: int = 0
 
     @classmethod
     def from_env(cls) -> "PipelineConfig":
         workspace_dir = Path(os.environ.get("WORKSPACE_DIR", str(WORKSPACE_DIR))).expanduser().resolve()
         output_dir = Path(os.environ.get("OUTPUT_DIR", str(OUTPUT_DIR))).expanduser().resolve()
         db_path = Path(os.environ.get("PIPELINE_DB_PATH", str(workspace_dir / "pipeline.sqlite3"))).expanduser().resolve()
+        backend = os.environ.get("PIPELINE_BACKEND", "mock").strip().lower() or "mock"
+        storage_backend = os.environ.get("PIPELINE_STORAGE_BACKEND", "local").strip().lower() or "local"
         return cls(
             workspace_dir=workspace_dir,
             output_dir=output_dir,
             db_path=db_path,
-            backend=os.environ.get("PIPELINE_BACKEND", "mock").strip().lower() or "mock",
+            backend=backend,
             afnext_endpoint=os.environ.get("AFNEXT_ENDPOINT", "http://127.0.0.1:8001/v1/audio-flamingo/ask"),
             sam_audio_endpoint=os.environ.get("SAM_AUDIO_ENDPOINT", "http://127.0.0.1:8002/v1/sam-audio/separate"),
             worker_enabled=parse_bool(os.environ.get("PIPELINE_WORKER_ENABLED"), default=True),
@@ -161,6 +254,13 @@ class PipelineConfig:
             sound_gate_min_active_ms=int(os.environ.get("PIPELINE_SOUND_GATE_MIN_ACTIVE_MS", "250")),
             sound_gate_min_active_ratio=float(os.environ.get("PIPELINE_SOUND_GATE_MIN_ACTIVE_RATIO", "0.01")),
             request_timeout_seconds=float(os.environ.get("PIPELINE_REQUEST_TIMEOUT_SECONDS", "600")),
+            storage_backend=storage_backend,
+            s3_bucket=os.environ.get("S3_BUCKET") or None,
+            s3_prefix=os.environ.get("S3_PREFIX", "qlabeler"),
+            s3_region=os.environ.get("S3_REGION") or os.environ.get("AWS_REGION") or None,
+            s3_endpoint_url=os.environ.get("S3_ENDPOINT_URL") or None,
+            s3_public_base_url=os.environ.get("S3_PUBLIC_BASE_URL") or None,
+            s3_presign_seconds=int(os.environ.get("S3_PRESIGN_SECONDS", "0")),
         )
 
 
@@ -197,8 +297,19 @@ class MockAudioRequest(BaseModel):
 
 
 class PipelineRuntime:
-    def __init__(self, config: PipelineConfig):
+    def __init__(self, config: PipelineConfig, storage: ArtifactStorage | None = None):
         self.config = config
+        self.storage = storage or create_storage_adapter(
+            backend=config.storage_backend,
+            output_dir=config.output_dir,
+            s3_bucket=config.s3_bucket,
+            s3_prefix=config.s3_prefix,
+            s3_region=config.s3_region,
+            s3_endpoint_url=config.s3_endpoint_url,
+            s3_public_base_url=config.s3_public_base_url,
+            s3_presign_seconds=config.s3_presign_seconds,
+        )
+        self._audio_duration_cache: dict[str, float] = {}
         self._worker_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._worker_lock = threading.Lock()
@@ -247,7 +358,7 @@ class PipelineRuntime:
                 CREATE TABLE IF NOT EXISTS tasks (
                     id TEXT PRIMARY KEY,
                     job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
-                    chunk_id TEXT NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
+                    chunk_id TEXT REFERENCES chunks(id) ON DELETE CASCADE,
                     queue TEXT NOT NULL,
                     status TEXT NOT NULL,
                     attempts INTEGER NOT NULL DEFAULT 0,
@@ -275,6 +386,20 @@ class PipelineRuntime:
                     created_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS artifacts (
+                    id TEXT PRIMARY KEY,
+                    job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+                    chunk_id TEXT REFERENCES chunks(id) ON DELETE CASCADE,
+                    task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+                    kind TEXT NOT NULL,
+                    path TEXT,
+                    text TEXT,
+                    prompt TEXT,
+                    backend TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     job_id TEXT REFERENCES jobs(id) ON DELETE CASCADE,
@@ -290,9 +415,60 @@ class PipelineRuntime:
                 CREATE INDEX IF NOT EXISTS idx_tasks_status_queue ON tasks(status, queue, created_at);
                 CREATE INDEX IF NOT EXISTS idx_tasks_job ON tasks(job_id);
                 CREATE INDEX IF NOT EXISTS idx_stems_job ON stems(job_id);
+                CREATE INDEX IF NOT EXISTS idx_artifacts_job ON artifacts(job_id, created_at);
+                CREATE INDEX IF NOT EXISTS idx_artifacts_kind ON artifacts(kind, created_at);
                 CREATE INDEX IF NOT EXISTS idx_events_job ON events(job_id, created_at);
                 """
             )
+            self._migrate_tasks_nullable_chunk_id(conn)
+
+    def _migrate_tasks_nullable_chunk_id(self, conn: sqlite3.Connection) -> None:
+        task_columns = conn.execute("PRAGMA table_info(tasks)").fetchall()
+        chunk_column = next((column for column in task_columns if column["name"] == "chunk_id"), None)
+        if chunk_column is None or int(chunk_column["notnull"]) == 0:
+            return
+
+        conn.execute("PRAGMA foreign_keys=OFF")
+        try:
+            conn.executescript(
+                """
+            DROP INDEX IF EXISTS idx_tasks_status_queue;
+            DROP INDEX IF EXISTS idx_tasks_job;
+
+            CREATE TABLE tasks_new (
+                id TEXT PRIMARY KEY,
+                job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+                chunk_id TEXT REFERENCES chunks(id) ON DELETE CASCADE,
+                queue TEXT NOT NULL,
+                status TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                result_json TEXT,
+                error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                started_at TEXT,
+                completed_at TEXT
+            );
+
+            INSERT INTO tasks_new (
+                id, job_id, chunk_id, queue, status, attempts, payload_json, result_json,
+                error, created_at, updated_at, started_at, completed_at
+            )
+            SELECT
+                id, job_id, chunk_id, queue, status, attempts, payload_json, result_json,
+                error, created_at, updated_at, started_at, completed_at
+            FROM tasks;
+
+            DROP TABLE tasks;
+            ALTER TABLE tasks_new RENAME TO tasks;
+
+            CREATE INDEX IF NOT EXISTS idx_tasks_status_queue ON tasks(status, queue, created_at);
+            CREATE INDEX IF NOT EXISTS idx_tasks_job ON tasks(job_id);
+            """
+            )
+        finally:
+            conn.execute("PRAGMA foreign_keys=ON")
 
     def start_worker(self) -> None:
         if not self.config.worker_enabled:
@@ -373,6 +549,18 @@ class PipelineRuntime:
                 """,
                 (job_id, str(audio_path), prompt_text, "queued", len(chunks), created_at, created_at),
             )
+            self._insert_task(
+                conn,
+                job_id=job_id,
+                chunk_id=None,
+                queue=TASK_AUDIO_FLAMINGO,
+                payload={
+                    "purpose": PURPOSE_DESCRIBE_SCENE,
+                    "audio_path": str(audio_path),
+                    "prompt": self.default_scene_prompt(prompt_text),
+                },
+                created_at=created_at,
+            )
             for chunk in chunks:
                 conn.execute(
                     """
@@ -398,7 +586,7 @@ class PipelineRuntime:
                     job_id=job_id,
                     chunk_id=chunk["id"],
                     queue=TASK_SOUND_GATE,
-                    payload={"audio_path": chunk["audio_path"]},
+                    payload={"purpose": PURPOSE_CHUNK_SOUND_GATE, "audio_path": chunk["audio_path"]},
                     created_at=created_at,
                 )
             self._insert_event(
@@ -438,7 +626,7 @@ class PipelineRuntime:
         conn: sqlite3.Connection,
         *,
         job_id: str,
-        chunk_id: str,
+        chunk_id: str | None,
         queue: str,
         payload: dict[str, Any],
         created_at: str | None = None,
@@ -474,6 +662,71 @@ class PipelineRuntime:
             (job_id, chunk_id, task_id, level, message, json_dumps(data or {}), created_at or now_iso()),
         )
 
+    def _insert_artifact(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        job_id: str,
+        chunk_id: str | None,
+        task_id: str | None,
+        kind: str,
+        path: str | None = None,
+        text: str | None = None,
+        prompt: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        created_at: str | None = None,
+    ) -> str:
+        artifact_id = new_id()
+        timestamp = created_at or now_iso()
+        stored_metadata = dict(metadata or {})
+        if path and Path(path).expanduser().is_file():
+            stored_metadata.setdefault(
+                "storage",
+                self.storage.store_artifact_file(
+                    Path(path),
+                    artifact_id=artifact_id,
+                    job_id=job_id,
+                    chunk_id=chunk_id,
+                    kind=kind,
+                ),
+            )
+        conn.execute(
+            """
+            INSERT INTO artifacts (
+                id, job_id, chunk_id, task_id, kind, path, text, prompt, backend, metadata_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                artifact_id,
+                job_id,
+                chunk_id,
+                task_id,
+                kind,
+                path,
+                text,
+                prompt,
+                self.config.backend,
+                json_dumps(stored_metadata),
+                timestamp,
+            ),
+        )
+        return artifact_id
+
+    def _has_incomplete_purpose_conn(self, conn: sqlite3.Connection, chunk_id: str, purpose: str) -> bool:
+        rows = conn.execute(
+            """
+            SELECT payload_json
+            FROM tasks
+            WHERE chunk_id = ? AND status IN (?, ?)
+            """,
+            (chunk_id, STATUS_PENDING, STATUS_RUNNING),
+        ).fetchall()
+        for row in rows:
+            payload = json_loads(row["payload_json"], {})
+            if payload.get("purpose") == purpose:
+                return True
+        return False
+
     def claim_next_task(self) -> dict[str, Any] | None:
         with self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -481,7 +734,7 @@ class PipelineRuntime:
                 """
                 SELECT * FROM tasks
                 WHERE status = ?
-                ORDER BY created_at ASC
+                ORDER BY created_at ASC, rowid ASC
                 LIMIT 1
                 """,
                 (STATUS_PENDING,),
@@ -526,24 +779,36 @@ class PipelineRuntime:
 
     def process_sound_gate(self, task: dict[str, Any]) -> None:
         payload = json_loads(task["payload_json"], {})
+        purpose = payload.get("purpose") or PURPOSE_CHUNK_SOUND_GATE
         audio_path = Path(payload["audio_path"])
         result = self.sound_gate(audio_path)
+        if purpose in {
+            PURPOSE_GATE_MUSIC,
+            PURPOSE_GATE_SFX_VOICE,
+            PURPOSE_GATE_VOICE,
+            PURPOSE_GATE_SFX,
+            PURPOSE_GATE_REMAINING_SFX,
+        }:
+            self.process_track_sound_gate(task, payload, result)
+            return
+
         timestamp = now_iso()
         with self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             if result["has_sound"]:
                 conn.execute(
                     "UPDATE chunks SET stage = ?, error = NULL, updated_at = ? WHERE id = ?",
-                    (STAGE_DESCRIBE_SFX, timestamp, task["chunk_id"]),
+                    (STAGE_SEPARATE_MUSIC, timestamp, task["chunk_id"]),
                 )
                 self._insert_task(
                     conn,
                     job_id=task["job_id"],
                     chunk_id=task["chunk_id"],
-                    queue=TASK_AUDIO_FLAMINGO,
+                    queue=TASK_SAM_AUDIO,
                     payload={
+                        "purpose": PURPOSE_SEPARATE_MUSIC,
                         "audio_path": str(audio_path),
-                        "prompt": self.default_audio_flamingo_prompt(task["job_id"]),
+                        "prompt": "music",
                     },
                     created_at=timestamp,
                 )
@@ -555,6 +820,16 @@ class PipelineRuntime:
                 )
                 message = "Sound gate skipped silent chunk"
 
+            self._insert_artifact(
+                conn,
+                job_id=task["job_id"],
+                chunk_id=task["chunk_id"],
+                task_id=task["id"],
+                kind=ARTIFACT_SOUND_GATE,
+                prompt=purpose,
+                metadata=result,
+                created_at=timestamp,
+            )
             self._complete_task_conn(conn, task["id"], result, timestamp)
             self._insert_event(
                 conn,
@@ -569,10 +844,193 @@ class PipelineRuntime:
             self._update_job_status_conn(conn, task["job_id"], timestamp)
             conn.execute("COMMIT")
 
+    def process_track_sound_gate(self, task: dict[str, Any], payload: dict[str, Any], result: dict[str, Any]) -> None:
+        purpose = payload["purpose"]
+        track_type = payload.get("track_type") or {
+            PURPOSE_GATE_MUSIC: "music",
+            PURPOSE_GATE_SFX_VOICE: "sfx_voice",
+            PURPOSE_GATE_VOICE: "voice",
+            PURPOSE_GATE_SFX: "sfx",
+            PURPOSE_GATE_REMAINING_SFX: "remaining_sfx",
+        }.get(purpose, "track")
+        audio_path = payload["audio_path"]
+        iteration = int(payload.get("iteration") or 0)
+        timestamp = now_iso()
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._insert_artifact(
+                conn,
+                job_id=task["job_id"],
+                chunk_id=task["chunk_id"],
+                task_id=task["id"],
+                kind=ARTIFACT_SOUND_GATE,
+                prompt=purpose,
+                metadata={"track_type": track_type, **result},
+                created_at=timestamp,
+            )
+
+            if track_type == "music":
+                if result["has_sound"]:
+                    self._insert_task(
+                        conn,
+                        job_id=task["job_id"],
+                        chunk_id=task["chunk_id"],
+                        queue=TASK_AUDIO_FLAMINGO,
+                        payload={
+                            "purpose": PURPOSE_DESCRIBE_MUSIC,
+                            "audio_path": audio_path,
+                            "prompt": self.default_music_description_prompt(),
+                            "source_artifact_id": payload.get("artifact_id"),
+                        },
+                        created_at=timestamp,
+                    )
+                    stage = STAGE_DESCRIBE_MUSIC
+                    message = "Music track gate passed"
+                else:
+                    stage = STAGE_GATE_SFX_VOICE if self._has_incomplete_purpose_conn(conn, task["chunk_id"], PURPOSE_GATE_SFX_VOICE) else STAGE_SKIPPED_MUSIC
+                    message = "Music track gate skipped silent output"
+            elif track_type == "sfx_voice":
+                if result["has_sound"]:
+                    self._insert_task(
+                        conn,
+                        job_id=task["job_id"],
+                        chunk_id=task["chunk_id"],
+                        queue=TASK_SAM_AUDIO,
+                        payload={
+                            "purpose": PURPOSE_SEPARATE_VOICES,
+                            "audio_path": audio_path,
+                            "prompt": "human voice",
+                            "source_artifact_id": payload.get("artifact_id"),
+                        },
+                        created_at=timestamp,
+                    )
+                    stage = STAGE_SEPARATE_VOICES
+                else:
+                    stage = STAGE_SKIPPED_SFX_VOICE
+                message = "SFX+voice track gate passed" if result["has_sound"] else "SFX+voice track gate skipped silent output"
+            elif track_type == "voice":
+                if result["has_sound"]:
+                    self._insert_task(
+                        conn,
+                        job_id=task["job_id"],
+                        chunk_id=task["chunk_id"],
+                        queue=TASK_AUDIO_FLAMINGO,
+                        payload={
+                            "purpose": PURPOSE_TRANSCRIBE_VOICE,
+                            "audio_path": audio_path,
+                            "prompt": self.default_voice_transcription_prompt(),
+                            "source_artifact_id": payload.get("artifact_id"),
+                        },
+                        created_at=timestamp,
+                    )
+                    stage = STAGE_TRANSCRIBE_VOICE
+                else:
+                    stage = STAGE_SKIPPED_VOICE
+                message = "Voice track gate passed" if result["has_sound"] else "Voice track gate skipped silent output"
+            elif track_type == "sfx":
+                if result["has_sound"]:
+                    self._insert_task(
+                        conn,
+                        job_id=task["job_id"],
+                        chunk_id=task["chunk_id"],
+                        queue=TASK_AUDIO_FLAMINGO,
+                        payload={
+                            "purpose": PURPOSE_LIST_SFX,
+                            "audio_path": audio_path,
+                            "prompt": self.default_sfx_list_prompt(),
+                            "iteration": 1,
+                            "source_artifact_id": payload.get("artifact_id"),
+                        },
+                        created_at=timestamp,
+                    )
+                    stage = STAGE_LIST_SFX
+                else:
+                    stage = STAGE_SKIPPED_SFX
+                message = "SFX track gate passed" if result["has_sound"] else "SFX track gate skipped silent output"
+            elif track_type == "remaining_sfx":
+                if result["has_sound"]:
+                    if iteration >= SFX_LOOP_MAX_ITERATIONS:
+                        self._insert_artifact(
+                            conn,
+                            job_id=task["job_id"],
+                            chunk_id=task["chunk_id"],
+                            task_id=task["id"],
+                            kind=ARTIFACT_SFX_LOOP_DEBUG,
+                            path=audio_path,
+                            text=f"Stopped after {iteration} SFX extraction iteration(s).",
+                            prompt=purpose,
+                            metadata={
+                                "reason": "iteration_limit",
+                                "iteration": iteration,
+                                "max_iterations": SFX_LOOP_MAX_ITERATIONS,
+                                "source_artifact_id": payload.get("artifact_id"),
+                            },
+                            created_at=timestamp,
+                        )
+                        stage = STAGE_SFX_ITERATION_LIMIT
+                        message = "SFX loop stopped at iteration limit"
+                    else:
+                        self._insert_task(
+                            conn,
+                            job_id=task["job_id"],
+                            chunk_id=task["chunk_id"],
+                            queue=TASK_AUDIO_FLAMINGO,
+                            payload={
+                                "purpose": PURPOSE_LIST_SFX,
+                                "audio_path": audio_path,
+                                "prompt": self.default_sfx_list_prompt(),
+                                "iteration": iteration + 1,
+                                "source_artifact_id": payload.get("artifact_id"),
+                            },
+                            created_at=timestamp,
+                        )
+                        stage = STAGE_LIST_SFX
+                        message = "Remaining SFX gate passed"
+                else:
+                    self._insert_artifact(
+                        conn,
+                        job_id=task["job_id"],
+                        chunk_id=task["chunk_id"],
+                        task_id=task["id"],
+                        kind=ARTIFACT_SFX_LOOP_DEBUG,
+                        path=audio_path,
+                        text="Remaining SFX residual is empty.",
+                        prompt=purpose,
+                        metadata={
+                            "reason": "residual_empty",
+                            "iteration": iteration,
+                            "source_artifact_id": payload.get("artifact_id"),
+                        },
+                        created_at=timestamp,
+                    )
+                    stage = STAGE_SFX_EXHAUSTED
+                    message = "SFX loop exhausted remaining audio"
+            else:
+                raise RuntimeError(f"Unknown track gate type: {track_type}")
+
+            conn.execute(
+                "UPDATE chunks SET stage = ?, error = NULL, updated_at = ? WHERE id = ?",
+                (stage, timestamp, task["chunk_id"]),
+            )
+            self._complete_task_conn(conn, task["id"], result, timestamp)
+            self._insert_event(
+                conn,
+                job_id=task["job_id"],
+                chunk_id=task["chunk_id"],
+                task_id=task["id"],
+                level="info",
+                message=message,
+                data={"track_type": track_type, **result},
+                created_at=timestamp,
+            )
+            self._update_job_status_conn(conn, task["job_id"], timestamp)
+            conn.execute("COMMIT")
+
     def process_audio_flamingo(self, task: dict[str, Any]) -> None:
         payload = json_loads(task["payload_json"], {})
+        purpose = payload.get("purpose") or PURPOSE_DESCRIBE_SFX
         audio_path = Path(payload["audio_path"])
-        prompt = payload.get("prompt") or self.default_audio_flamingo_prompt(task["job_id"])
+        prompt = payload.get("prompt") or self.default_prompt_for_audio_flamingo_purpose(purpose, task["job_id"])
         if self.config.backend == "mock":
             response = self.mock_audio_flamingo(audio_path, prompt)
         else:
@@ -588,6 +1046,19 @@ class PipelineRuntime:
             )
 
         text = str(response.get("text", "")).strip()
+        if purpose == PURPOSE_DESCRIBE_SCENE:
+            self.complete_scene_description(task, text, response)
+            return
+        if purpose == PURPOSE_DESCRIBE_MUSIC:
+            self.complete_music_description(task, text, response)
+            return
+        if purpose == PURPOSE_TRANSCRIBE_VOICE:
+            self.complete_voice_transcription(task, text, response)
+            return
+        if purpose == PURPOSE_LIST_SFX:
+            self.complete_sfx_list(task, text, response)
+            return
+
         target_prompt = self.extract_sam_prompt(text)
         timestamp = now_iso()
         with self.connect() as conn:
@@ -602,6 +1073,7 @@ class PipelineRuntime:
                 chunk_id=task["chunk_id"],
                 queue=TASK_SAM_AUDIO,
                 payload={
+                    "purpose": PURPOSE_SEPARATE_SFX,
                     "audio_path": str(audio_path),
                     "prompt": target_prompt,
                     "audio_flamingo_text": text,
@@ -627,12 +1099,268 @@ class PipelineRuntime:
             self._update_job_status_conn(conn, task["job_id"], timestamp)
             conn.execute("COMMIT")
 
+    def complete_sfx_list(self, task: dict[str, Any], text: str, response: dict[str, Any]) -> None:
+        payload = json_loads(task["payload_json"], {})
+        iteration = int(payload.get("iteration") or 1)
+        parsed, parse_error = self.parse_sfx_list_text(text)
+        effects = parsed.get("effects", []) if parsed else []
+        first_effect = effects[0] if effects else None
+        sam_prompt = str((first_effect or {}).get("sam_prompt") or "").strip()
+        timestamp = now_iso()
+
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            sfx_list_artifact_id = self._insert_artifact(
+                conn,
+                job_id=task["job_id"],
+                chunk_id=task["chunk_id"],
+                task_id=task["id"],
+                kind=ARTIFACT_SFX_LIST,
+                path=payload.get("audio_path"),
+                text=text,
+                prompt=payload.get("prompt"),
+                metadata={
+                    "iteration": iteration,
+                    "parsed": parsed,
+                    "parse_error": parse_error,
+                    "response": response,
+                    "source_artifact_id": payload.get("source_artifact_id"),
+                },
+                created_at=timestamp,
+            )
+
+            if parse_error:
+                stage = STAGE_SFX_EXHAUSTED
+                result = {"text": text, "parsed": parsed, "parse_error": parse_error, "backend": self.config.backend}
+                self._insert_artifact(
+                    conn,
+                    job_id=task["job_id"],
+                    chunk_id=task["chunk_id"],
+                    task_id=task["id"],
+                    kind=ARTIFACT_SFX_LOOP_DEBUG,
+                    path=payload.get("audio_path"),
+                    text=text,
+                    prompt=payload.get("prompt"),
+                    metadata={
+                        "reason": "parse_error",
+                        "iteration": iteration,
+                        "parse_error": parse_error,
+                        "source_artifact_id": payload.get("source_artifact_id"),
+                    },
+                    created_at=timestamp,
+                )
+                message = "Audio Flamingo SFX list parse failed; loop exhausted"
+            elif not first_effect:
+                stage = STAGE_SFX_EXHAUSTED
+                result = {"text": text, "parsed": parsed, "selected_effect": None, "backend": self.config.backend}
+                self._insert_artifact(
+                    conn,
+                    job_id=task["job_id"],
+                    chunk_id=task["chunk_id"],
+                    task_id=task["id"],
+                    kind=ARTIFACT_SFX_LOOP_DEBUG,
+                    path=payload.get("audio_path"),
+                    text="Audio Flamingo returned no SFX candidates.",
+                    prompt=payload.get("prompt"),
+                    metadata={
+                        "reason": "empty_effects",
+                        "iteration": iteration,
+                        "source_artifact_id": payload.get("source_artifact_id"),
+                    },
+                    created_at=timestamp,
+                )
+                message = "Audio Flamingo returned no SFX candidates"
+            elif not sam_prompt:
+                stage = STAGE_SFX_LOOP_FAILED
+                result = {"text": text, "parsed": parsed, "selected_effect": first_effect, "backend": self.config.backend}
+                self._insert_artifact(
+                    conn,
+                    job_id=task["job_id"],
+                    chunk_id=task["chunk_id"],
+                    task_id=task["id"],
+                    kind=ARTIFACT_SFX_LOOP_DEBUG,
+                    path=payload.get("audio_path"),
+                    text=text,
+                    prompt=payload.get("prompt"),
+                    metadata={
+                        "reason": "missing_sam_prompt",
+                        "iteration": iteration,
+                        "selected_effect": first_effect,
+                        "source_artifact_id": payload.get("source_artifact_id"),
+                    },
+                    created_at=timestamp,
+                )
+                message = "Audio Flamingo SFX candidate missing SAM prompt"
+            else:
+                stage = STAGE_SEPARATE_SFX
+                result = {
+                    "text": text,
+                    "parsed": parsed,
+                    "selected_effect": first_effect,
+                    "sam_prompt": sam_prompt,
+                    "backend": self.config.backend,
+                }
+                self._insert_task(
+                    conn,
+                    job_id=task["job_id"],
+                    chunk_id=task["chunk_id"],
+                    queue=TASK_SAM_AUDIO,
+                    payload={
+                        "purpose": PURPOSE_SEPARATE_SFX,
+                        "audio_path": payload["audio_path"],
+                        "prompt": sam_prompt,
+                        "iteration": iteration,
+                        "selected_effect": first_effect,
+                        "sfx_list_artifact_id": sfx_list_artifact_id,
+                        "source_artifact_id": payload.get("source_artifact_id"),
+                    },
+                    created_at=timestamp,
+                )
+                message = "Audio Flamingo listed SFX candidate"
+
+            conn.execute(
+                "UPDATE chunks SET stage = ?, error = NULL, updated_at = ? WHERE id = ?",
+                (stage, timestamp, task["chunk_id"]),
+            )
+            self._complete_task_conn(conn, task["id"], result, timestamp)
+            self._insert_event(
+                conn,
+                job_id=task["job_id"],
+                chunk_id=task["chunk_id"],
+                task_id=task["id"],
+                level="info",
+                message=message,
+                data=result,
+                created_at=timestamp,
+            )
+            self._update_job_status_conn(conn, task["job_id"], timestamp)
+            conn.execute("COMMIT")
+
+    def complete_scene_description(self, task: dict[str, Any], text: str, response: dict[str, Any]) -> None:
+        timestamp = now_iso()
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._insert_artifact(
+                conn,
+                job_id=task["job_id"],
+                chunk_id=None,
+                task_id=task["id"],
+                kind=ARTIFACT_SCENE_DESCRIPTION,
+                text=text,
+                prompt=(json_loads(task["payload_json"], {}) or {}).get("prompt"),
+                metadata=response,
+                created_at=timestamp,
+            )
+            self._complete_task_conn(
+                conn,
+                task["id"],
+                {"text": text, "backend": self.config.backend},
+                timestamp,
+            )
+            self._insert_event(
+                conn,
+                job_id=task["job_id"],
+                chunk_id=None,
+                task_id=task["id"],
+                level="info",
+                message="Audio Flamingo described whole scene",
+                data={"text": text},
+                created_at=timestamp,
+            )
+            self._update_job_status_conn(conn, task["job_id"], timestamp)
+            conn.execute("COMMIT")
+
+    def complete_music_description(self, task: dict[str, Any], text: str, response: dict[str, Any]) -> None:
+        payload = json_loads(task["payload_json"], {})
+        timestamp = now_iso()
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._insert_artifact(
+                conn,
+                job_id=task["job_id"],
+                chunk_id=task["chunk_id"],
+                task_id=task["id"],
+                kind=ARTIFACT_MUSIC_DESCRIPTION,
+                text=text,
+                prompt=payload.get("prompt"),
+                metadata={
+                    "source_artifact_id": payload.get("source_artifact_id"),
+                    "response": response,
+                },
+                created_at=timestamp,
+            )
+            conn.execute(
+                "UPDATE chunks SET stage = ?, error = NULL, updated_at = ? WHERE id = ?",
+                (STAGE_MUSIC_DESCRIBED, timestamp, task["chunk_id"]),
+            )
+            self._complete_task_conn(
+                conn,
+                task["id"],
+                {"text": text, "backend": self.config.backend},
+                timestamp,
+            )
+            self._insert_event(
+                conn,
+                job_id=task["job_id"],
+                chunk_id=task["chunk_id"],
+                task_id=task["id"],
+                level="info",
+                message="Audio Flamingo described music track",
+                data={"text": text},
+                created_at=timestamp,
+            )
+            self._update_job_status_conn(conn, task["job_id"], timestamp)
+            conn.execute("COMMIT")
+
+    def complete_voice_transcription(self, task: dict[str, Any], text: str, response: dict[str, Any]) -> None:
+        payload = json_loads(task["payload_json"], {})
+        timestamp = now_iso()
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._insert_artifact(
+                conn,
+                job_id=task["job_id"],
+                chunk_id=task["chunk_id"],
+                task_id=task["id"],
+                kind=ARTIFACT_VOICE_TRANSCRIPTION,
+                text=text,
+                prompt=payload.get("prompt"),
+                metadata={
+                    "source_artifact_id": payload.get("source_artifact_id"),
+                    "response": response,
+                },
+                created_at=timestamp,
+            )
+            conn.execute(
+                "UPDATE chunks SET stage = ?, error = NULL, updated_at = ? WHERE id = ?",
+                (STAGE_VOICE_TRANSCRIBED, timestamp, task["chunk_id"]),
+            )
+            self._complete_task_conn(
+                conn,
+                task["id"],
+                {"text": text, "backend": self.config.backend},
+                timestamp,
+            )
+            self._insert_event(
+                conn,
+                job_id=task["job_id"],
+                chunk_id=task["chunk_id"],
+                task_id=task["id"],
+                level="info",
+                message="Audio Flamingo transcribed voice track with diarization",
+                data={"text": text},
+                created_at=timestamp,
+            )
+            self._update_job_status_conn(conn, task["job_id"], timestamp)
+            conn.execute("COMMIT")
+
     def process_sam_audio(self, task: dict[str, Any]) -> None:
         payload = json_loads(task["payload_json"], {})
+        purpose = payload.get("purpose") or PURPOSE_SEPARATE_SFX
         audio_path = Path(payload["audio_path"])
         prompt = payload["prompt"]
         chunk = self.chunk(task["chunk_id"])
-        output_prefix = clean_prefix(f"job_{task['job_id']}_chunk_{chunk['chunk_index']:04d}_{prompt}")
+        output_prefix = clean_prefix(f"job_{task['job_id']}_chunk_{chunk['chunk_index']:04d}_{purpose}_{prompt}")
 
         if self.config.backend == "mock":
             response = self.mock_sam_audio(audio_path, prompt, output_prefix, task["job_id"])
@@ -649,6 +1377,16 @@ class PipelineRuntime:
                 },
                 timeout=self.config.request_timeout_seconds,
             )
+
+        if purpose == PURPOSE_SEPARATE_MUSIC:
+            self.complete_music_separation(task, prompt, response)
+            return
+        if purpose == PURPOSE_SEPARATE_VOICES:
+            self.complete_voice_separation(task, prompt, response)
+            return
+        if purpose == PURPOSE_SEPARATE_SFX:
+            self.complete_sfx_separation(task, prompt, response)
+            return
 
         timestamp = now_iso()
         target = response.get("target") or {}
@@ -696,6 +1434,267 @@ class PipelineRuntime:
             self._update_job_status_conn(conn, task["job_id"], timestamp)
             conn.execute("COMMIT")
 
+    def complete_music_separation(self, task: dict[str, Any], prompt: str, response: dict[str, Any]) -> None:
+        timestamp = now_iso()
+        target = response.get("target") or {}
+        residual = response.get("residual") or {}
+        music_path = self.preferred_audio_path(target)
+        sfx_voice_path = self.preferred_audio_path(residual)
+        if not music_path:
+            raise RuntimeError(f"SAM-Audio music response missing target audio path: {response}")
+        if not sfx_voice_path:
+            raise RuntimeError(f"SAM-Audio music response missing residual audio path: {response}")
+
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            music_artifact_id = self._insert_artifact(
+                conn,
+                job_id=task["job_id"],
+                chunk_id=task["chunk_id"],
+                task_id=task["id"],
+                kind=ARTIFACT_MUSIC_TRACK,
+                path=music_path,
+                prompt=prompt,
+                metadata={"role": "target", "refs": target, "response": response},
+                created_at=timestamp,
+            )
+            sfx_voice_artifact_id = self._insert_artifact(
+                conn,
+                job_id=task["job_id"],
+                chunk_id=task["chunk_id"],
+                task_id=task["id"],
+                kind=ARTIFACT_SFX_VOICE_TRACK,
+                path=sfx_voice_path,
+                prompt="residual after music",
+                metadata={"role": "residual", "refs": residual, "response": response},
+                created_at=timestamp,
+            )
+            self._insert_task(
+                conn,
+                job_id=task["job_id"],
+                chunk_id=task["chunk_id"],
+                queue=TASK_SOUND_GATE,
+                payload={
+                    "purpose": PURPOSE_GATE_MUSIC,
+                    "track_type": "music",
+                    "audio_path": music_path,
+                    "artifact_id": music_artifact_id,
+                },
+                created_at=timestamp,
+            )
+            self._insert_task(
+                conn,
+                job_id=task["job_id"],
+                chunk_id=task["chunk_id"],
+                queue=TASK_SOUND_GATE,
+                payload={
+                    "purpose": PURPOSE_GATE_SFX_VOICE,
+                    "track_type": "sfx_voice",
+                    "audio_path": sfx_voice_path,
+                    "artifact_id": sfx_voice_artifact_id,
+                },
+                created_at=timestamp,
+            )
+            conn.execute(
+                "UPDATE chunks SET stage = ?, error = NULL, updated_at = ? WHERE id = ?",
+                (STAGE_GATE_MUSIC, timestamp, task["chunk_id"]),
+            )
+            self._complete_task_conn(conn, task["id"], response, timestamp)
+            self._insert_event(
+                conn,
+                job_id=task["job_id"],
+                chunk_id=task["chunk_id"],
+                task_id=task["id"],
+                level="info",
+                message="SAM-Audio separated music track",
+                data={"prompt": prompt, "music_path": music_path, "sfx_voice_path": sfx_voice_path},
+                created_at=timestamp,
+            )
+            self._update_job_status_conn(conn, task["job_id"], timestamp)
+            conn.execute("COMMIT")
+
+    def complete_voice_separation(self, task: dict[str, Any], prompt: str, response: dict[str, Any]) -> None:
+        timestamp = now_iso()
+        target = response.get("target") or {}
+        residual = response.get("residual") or {}
+        voice_path = self.preferred_audio_path(target)
+        sfx_path = self.preferred_audio_path(residual)
+        if not voice_path:
+            raise RuntimeError(f"SAM-Audio voice response missing target audio path: {response}")
+        if not sfx_path:
+            raise RuntimeError(f"SAM-Audio voice response missing residual audio path: {response}")
+
+        payload = json_loads(task["payload_json"], {})
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            voice_artifact_id = self._insert_artifact(
+                conn,
+                job_id=task["job_id"],
+                chunk_id=task["chunk_id"],
+                task_id=task["id"],
+                kind=ARTIFACT_VOICE_TRACK,
+                path=voice_path,
+                prompt=prompt,
+                metadata={
+                    "role": "target",
+                    "source_artifact_id": payload.get("source_artifact_id"),
+                    "refs": target,
+                    "response": response,
+                },
+                created_at=timestamp,
+            )
+            sfx_artifact_id = self._insert_artifact(
+                conn,
+                job_id=task["job_id"],
+                chunk_id=task["chunk_id"],
+                task_id=task["id"],
+                kind=ARTIFACT_SFX_TRACK,
+                path=sfx_path,
+                prompt="residual after voice",
+                metadata={
+                    "role": "residual",
+                    "source_artifact_id": payload.get("source_artifact_id"),
+                    "refs": residual,
+                    "response": response,
+                },
+                created_at=timestamp,
+            )
+            self._insert_task(
+                conn,
+                job_id=task["job_id"],
+                chunk_id=task["chunk_id"],
+                queue=TASK_SOUND_GATE,
+                payload={
+                    "purpose": PURPOSE_GATE_VOICE,
+                    "track_type": "voice",
+                    "audio_path": voice_path,
+                    "artifact_id": voice_artifact_id,
+                },
+                created_at=timestamp,
+            )
+            self._insert_task(
+                conn,
+                job_id=task["job_id"],
+                chunk_id=task["chunk_id"],
+                queue=TASK_SOUND_GATE,
+                payload={
+                    "purpose": PURPOSE_GATE_SFX,
+                    "track_type": "sfx",
+                    "audio_path": sfx_path,
+                    "artifact_id": sfx_artifact_id,
+                },
+                created_at=timestamp,
+            )
+            conn.execute(
+                "UPDATE chunks SET stage = ?, error = NULL, updated_at = ? WHERE id = ?",
+                (STAGE_GATE_VOICE, timestamp, task["chunk_id"]),
+            )
+            self._complete_task_conn(conn, task["id"], response, timestamp)
+            self._insert_event(
+                conn,
+                job_id=task["job_id"],
+                chunk_id=task["chunk_id"],
+                task_id=task["id"],
+                level="info",
+                message="SAM-Audio separated voice and SFX tracks",
+                data={"prompt": prompt, "voice_path": voice_path, "sfx_path": sfx_path},
+                created_at=timestamp,
+            )
+            self._update_job_status_conn(conn, task["job_id"], timestamp)
+            conn.execute("COMMIT")
+
+    def complete_sfx_separation(self, task: dict[str, Any], prompt: str, response: dict[str, Any]) -> None:
+        timestamp = now_iso()
+        target = response.get("target") or {}
+        residual = response.get("residual") or {}
+        isolated_path = self.preferred_audio_path(target)
+        remaining_path = self.preferred_audio_path(residual)
+        if not isolated_path:
+            raise RuntimeError(f"SAM-Audio SFX response missing target audio path: {response}")
+        if not remaining_path:
+            raise RuntimeError(f"SAM-Audio SFX response missing residual audio path: {response}")
+
+        payload = json_loads(task["payload_json"], {})
+        iteration = int(payload.get("iteration") or 1)
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            isolated_artifact_id = self._insert_artifact(
+                conn,
+                job_id=task["job_id"],
+                chunk_id=task["chunk_id"],
+                task_id=task["id"],
+                kind=ARTIFACT_SFX_ISOLATED_TRACK,
+                path=isolated_path,
+                prompt=prompt,
+                metadata={
+                    "role": "target",
+                    "iteration": iteration,
+                    "selected_effect": payload.get("selected_effect"),
+                    "sfx_list_artifact_id": payload.get("sfx_list_artifact_id"),
+                    "source_artifact_id": payload.get("source_artifact_id"),
+                    "refs": target,
+                    "response": response,
+                },
+                created_at=timestamp,
+            )
+            remaining_artifact_id = self._insert_artifact(
+                conn,
+                job_id=task["job_id"],
+                chunk_id=task["chunk_id"],
+                task_id=task["id"],
+                kind=ARTIFACT_SFX_REMAINING_TRACK,
+                path=remaining_path,
+                prompt="residual after sfx",
+                metadata={
+                    "role": "residual",
+                    "iteration": iteration,
+                    "selected_effect": payload.get("selected_effect"),
+                    "sfx_list_artifact_id": payload.get("sfx_list_artifact_id"),
+                    "source_artifact_id": payload.get("source_artifact_id"),
+                    "isolated_artifact_id": isolated_artifact_id,
+                    "refs": residual,
+                    "response": response,
+                },
+                created_at=timestamp,
+            )
+            self._insert_task(
+                conn,
+                job_id=task["job_id"],
+                chunk_id=task["chunk_id"],
+                queue=TASK_SOUND_GATE,
+                payload={
+                    "purpose": PURPOSE_GATE_REMAINING_SFX,
+                    "track_type": "remaining_sfx",
+                    "audio_path": remaining_path,
+                    "artifact_id": remaining_artifact_id,
+                    "isolated_artifact_id": isolated_artifact_id,
+                    "iteration": iteration,
+                },
+                created_at=timestamp,
+            )
+            conn.execute(
+                "UPDATE chunks SET stage = ?, error = NULL, updated_at = ? WHERE id = ?",
+                (STAGE_GATE_REMAINING_SFX, timestamp, task["chunk_id"]),
+            )
+            self._complete_task_conn(conn, task["id"], response, timestamp)
+            self._insert_event(
+                conn,
+                job_id=task["job_id"],
+                chunk_id=task["chunk_id"],
+                task_id=task["id"],
+                level="info",
+                message="SAM-Audio separated one SFX candidate",
+                data={
+                    "prompt": prompt,
+                    "iteration": iteration,
+                    "isolated_path": isolated_path,
+                    "remaining_path": remaining_path,
+                },
+                created_at=timestamp,
+            )
+            self._update_job_status_conn(conn, task["job_id"], timestamp)
+            conn.execute("COMMIT")
+
     def fail_task(self, task: dict[str, Any], error: str) -> None:
         timestamp = now_iso()
         with self.connect() as conn:
@@ -708,10 +1707,11 @@ class PipelineRuntime:
                 """,
                 (STATUS_FAILED, error, timestamp, timestamp, task["id"]),
             )
-            conn.execute(
-                "UPDATE chunks SET stage = ?, error = ?, updated_at = ? WHERE id = ?",
-                (STAGE_FAILED, error, timestamp, task["chunk_id"]),
-            )
+            if task.get("chunk_id"):
+                conn.execute(
+                    "UPDATE chunks SET stage = ?, error = ?, updated_at = ? WHERE id = ?",
+                    (STAGE_FAILED, error, timestamp, task["chunk_id"]),
+                )
             conn.execute(
                 "UPDATE jobs SET status = ?, error = ?, updated_at = ? WHERE id = ?",
                 (STATUS_FAILED, error, timestamp, task["job_id"]),
@@ -739,11 +1739,31 @@ class PipelineRuntime:
                 conn.execute("ROLLBACK")
                 raise ValueError(f"Only failed tasks can be retried; task is {task['status']}")
 
+            payload = json_loads(task["payload_json"], {})
+            purpose = payload.get("purpose")
             stage = {
-                TASK_SOUND_GATE: STAGE_SOUND_GATE,
-                TASK_AUDIO_FLAMINGO: STAGE_DESCRIBE_SFX,
-                TASK_SAM_AUDIO: STAGE_SEPARATE_SFX,
-            }.get(task["queue"], STAGE_FAILED)
+                PURPOSE_CHUNK_SOUND_GATE: STAGE_SOUND_GATE,
+                PURPOSE_DESCRIBE_SCENE: STAGE_DESCRIBE_SCENE,
+                PURPOSE_SEPARATE_MUSIC: STAGE_SEPARATE_MUSIC,
+                PURPOSE_GATE_MUSIC: STAGE_GATE_MUSIC,
+                PURPOSE_GATE_SFX_VOICE: STAGE_GATE_SFX_VOICE,
+                PURPOSE_DESCRIBE_MUSIC: STAGE_DESCRIBE_MUSIC,
+                PURPOSE_SEPARATE_VOICES: STAGE_SEPARATE_VOICES,
+                PURPOSE_GATE_VOICE: STAGE_GATE_VOICE,
+                PURPOSE_GATE_SFX: STAGE_GATE_SFX,
+                PURPOSE_TRANSCRIBE_VOICE: STAGE_TRANSCRIBE_VOICE,
+                PURPOSE_LIST_SFX: STAGE_LIST_SFX,
+                PURPOSE_GATE_REMAINING_SFX: STAGE_GATE_REMAINING_SFX,
+                PURPOSE_DESCRIBE_SFX: STAGE_DESCRIBE_SFX,
+                PURPOSE_SEPARATE_SFX: STAGE_SEPARATE_SFX,
+            }.get(
+                purpose,
+                {
+                    TASK_SOUND_GATE: STAGE_SOUND_GATE,
+                    TASK_AUDIO_FLAMINGO: STAGE_DESCRIBE_SFX,
+                    TASK_SAM_AUDIO: STAGE_SEPARATE_SFX,
+                }.get(task["queue"], STAGE_FAILED),
+            )
             timestamp = now_iso()
             conn.execute(
                 """
@@ -754,10 +1774,11 @@ class PipelineRuntime:
                 """,
                 (STATUS_PENDING, timestamp, task_id),
             )
-            conn.execute(
-                "UPDATE chunks SET stage = ?, error = NULL, updated_at = ? WHERE id = ?",
-                (stage, timestamp, task["chunk_id"]),
-            )
+            if task["chunk_id"]:
+                conn.execute(
+                    "UPDATE chunks SET stage = ?, error = NULL, updated_at = ? WHERE id = ?",
+                    (stage, timestamp, task["chunk_id"]),
+                )
             conn.execute(
                 "UPDATE jobs SET status = ?, error = NULL, updated_at = ? WHERE id = ?",
                 ("queued", timestamp, task["job_id"]),
@@ -807,12 +1828,194 @@ class PipelineRuntime:
             (status, status, STATUS_FAILED, timestamp, job_id),
         )
 
+    @staticmethod
+    def parse_timestamp(value: str | None) -> datetime | None:
+        if not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed
+
+    @staticmethod
+    def elapsed_seconds(started_at: str | None, completed_at: str | None) -> float | None:
+        started = PipelineRuntime.parse_timestamp(started_at)
+        completed = PipelineRuntime.parse_timestamp(completed_at)
+        if not started or not completed:
+            return None
+        return max(0.001, (completed - started).total_seconds())
+
+    @staticmethod
+    def purpose_for_task(queue: str, payload: dict[str, Any]) -> str:
+        purpose = payload.get("purpose")
+        if purpose:
+            return str(purpose)
+        return {
+            TASK_SOUND_GATE: PURPOSE_CHUNK_SOUND_GATE,
+            TASK_AUDIO_FLAMINGO: PURPOSE_DESCRIBE_SFX,
+            TASK_SAM_AUDIO: PURPOSE_SEPARATE_SFX,
+        }.get(queue, queue)
+
+    def audio_duration_seconds_for_path(self, audio_path: str | None) -> float | None:
+        if not audio_path:
+            return None
+        try:
+            resolved = str(Path(audio_path).expanduser().resolve())
+        except Exception:
+            return None
+        if resolved in self._audio_duration_cache:
+            return self._audio_duration_cache[resolved]
+        path = Path(resolved)
+        if not path.is_file():
+            return None
+        try:
+            duration = len(AudioSegment.from_file(str(path))) / 1000.0
+        except Exception:
+            return None
+        self._audio_duration_cache[resolved] = duration
+        return duration
+
+    def task_audio_duration_seconds(self, row: sqlite3.Row, payload: dict[str, Any], result: dict[str, Any] | None) -> float | None:
+        if row["chunk_duration_ms"] is not None:
+            return max(0.0, float(row["chunk_duration_ms"]) / 1000.0)
+        if isinstance(result, dict) and result.get("duration_ms") is not None:
+            return max(0.0, float(result["duration_ms"]) / 1000.0)
+        return self.audio_duration_seconds_for_path(payload.get("audio_path") or row["source_audio_path"])
+
+    @staticmethod
+    def empty_performance_metric() -> dict[str, Any]:
+        return {
+            "completed_tasks": 0,
+            "audio_seconds": 0.0,
+            "wall_seconds": 0.0,
+            "audio_seconds_per_minute": 0.0,
+            "realtime_factor": 0.0,
+            "avg_task_seconds": 0.0,
+            "avg_audio_seconds": 0.0,
+        }
+
+    @classmethod
+    def add_performance_sample(cls, metric: dict[str, Any], *, audio_seconds: float, wall_seconds: float) -> None:
+        metric["completed_tasks"] += 1
+        metric["audio_seconds"] += audio_seconds
+        metric["wall_seconds"] += wall_seconds
+
+    @classmethod
+    def finalize_performance_metric(cls, metric: dict[str, Any]) -> dict[str, Any]:
+        completed = int(metric["completed_tasks"])
+        audio_seconds = float(metric["audio_seconds"])
+        wall_seconds = float(metric["wall_seconds"])
+        audio_seconds_per_minute = (audio_seconds / wall_seconds * 60.0) if wall_seconds > 0 else 0.0
+        realtime_factor = (audio_seconds / wall_seconds) if wall_seconds > 0 else 0.0
+        avg_task_seconds = (wall_seconds / completed) if completed else 0.0
+        avg_audio_seconds = (audio_seconds / completed) if completed else 0.0
+        return {
+            "completed_tasks": completed,
+            "audio_seconds": round(audio_seconds, 3),
+            "wall_seconds": round(wall_seconds, 3),
+            "audio_seconds_per_minute": round(audio_seconds_per_minute, 3),
+            "realtime_factor": round(realtime_factor, 3),
+            "avg_task_seconds": round(avg_task_seconds, 3),
+            "avg_audio_seconds": round(avg_audio_seconds, 3),
+        }
+
+    def performance_summary(self, conn: sqlite3.Connection) -> dict[str, Any]:
+        overall = self.empty_performance_metric()
+        queues = {queue: self.empty_performance_metric() for queue in TASK_QUEUES}
+        purposes = {purpose: self.empty_performance_metric() for purpose in PURPOSES}
+
+        rows = conn.execute(
+            """
+            SELECT
+                t.queue,
+                t.payload_json,
+                t.result_json,
+                t.started_at,
+                t.completed_at,
+                c.duration_ms AS chunk_duration_ms,
+                j.source_audio_path AS source_audio_path
+            FROM tasks t
+            LEFT JOIN chunks c ON c.id = t.chunk_id
+            LEFT JOIN jobs j ON j.id = t.job_id
+            WHERE t.status = ?
+              AND t.started_at IS NOT NULL
+              AND t.completed_at IS NOT NULL
+            """,
+            (STATUS_COMPLETED,),
+        ).fetchall()
+
+        for row in rows:
+            wall_seconds = self.elapsed_seconds(row["started_at"], row["completed_at"])
+            if wall_seconds is None:
+                continue
+            payload = json_loads(row["payload_json"], {})
+            result = json_loads(row["result_json"], None)
+            audio_seconds = self.task_audio_duration_seconds(row, payload, result)
+            if audio_seconds is None or audio_seconds <= 0:
+                continue
+            purpose = self.purpose_for_task(row["queue"], payload)
+            queues.setdefault(row["queue"], self.empty_performance_metric())
+            purposes.setdefault(purpose, self.empty_performance_metric())
+            self.add_performance_sample(overall, audio_seconds=audio_seconds, wall_seconds=wall_seconds)
+            self.add_performance_sample(queues[row["queue"]], audio_seconds=audio_seconds, wall_seconds=wall_seconds)
+            self.add_performance_sample(purposes[purpose], audio_seconds=audio_seconds, wall_seconds=wall_seconds)
+
+        return {
+            "overall": self.finalize_performance_metric(overall),
+            "queues": {name: self.finalize_performance_metric(metric) for name, metric in queues.items()},
+            "purposes": {name: self.finalize_performance_metric(metric) for name, metric in purposes.items()},
+        }
+
+    def default_scene_prompt(self, override: str | None) -> str:
+        if override and override.strip():
+            return override.strip()
+        return (
+            "Describe the whole audio scene concisely. Include the setting, music, voices, "
+            "and notable sound effects if present."
+        )
+
     def default_audio_flamingo_prompt(self, job_id: str) -> str:
         with self.connect() as conn:
             row = conn.execute("SELECT prompt FROM jobs WHERE id = ?", (job_id,)).fetchone()
         if row and row["prompt"]:
             return row["prompt"]
         return "Identify audible sources and return exactly two lines: SOUNDS: <sources>; SAM_PROMPT: <one target sound only>."
+
+    def default_prompt_for_audio_flamingo_purpose(self, purpose: str, job_id: str) -> str:
+        if purpose == PURPOSE_DESCRIBE_SCENE:
+            return self.default_scene_prompt(None)
+        if purpose == PURPOSE_DESCRIBE_MUSIC:
+            return self.default_music_description_prompt()
+        if purpose == PURPOSE_TRANSCRIBE_VOICE:
+            return self.default_voice_transcription_prompt()
+        if purpose == PURPOSE_LIST_SFX:
+            return self.default_sfx_list_prompt()
+        return self.default_audio_flamingo_prompt(job_id)
+
+    @staticmethod
+    def default_music_description_prompt() -> str:
+        return (
+            "Describe the music in this audio. Include style or genre, instrumentation, mood, "
+            "tempo, and whether it is foreground or background."
+        )
+
+    @staticmethod
+    def default_voice_transcription_prompt() -> str:
+        return (
+            "Transcribe any speech in this audio with speaker labels and diarization when possible. "
+            "If there is no speech, say so."
+        )
+
+    @staticmethod
+    def default_sfx_list_prompt() -> str:
+        return (
+            "List audible sound effects in this audio. Return strict JSON only, with no markdown, "
+            'using this shape: {"effects":[{"label":"...", "sam_prompt":"...", "explanation":"..."}]}. '
+            "Use a concise SAM prompt for one separable sound effect."
+        )
 
     @staticmethod
     def amplitude_dbfs(amplitude: float, max_possible_amplitude: float) -> float:
@@ -885,11 +2088,32 @@ class PipelineRuntime:
         return self.sound_gate(audio_path)
 
     def mock_audio_flamingo(self, audio_path: Path, prompt: str) -> dict[str, str]:
+        prompt_lower = prompt.lower()
+        if "whole audio scene" in prompt_lower or "full audio scene" in prompt_lower:
+            text = "A mock outdoor scene with rhythmic horse hooves, light ambient noise, and cinematic music."
+        elif "describe the music" in prompt_lower or "music in this audio" in prompt_lower:
+            text = "MUSIC: mock cinematic strings with a steady pulse, warm mood, and background-score placement."
+        elif "transcribe" in prompt_lower or "diarization" in prompt_lower or "speaker labels" in prompt_lower:
+            text = "SPEAKER_1: Mock diarized transcription for the audible voice track."
+        elif "strict json" in prompt_lower and "effects" in prompt_lower:
+            text = json_dumps(
+                {
+                    "effects": [
+                        {
+                            "label": "mock horse hooves",
+                            "sam_prompt": "horse hooves",
+                            "explanation": "A rhythmic hoofbeat-like sound remains in the SFX track.",
+                        }
+                    ]
+                }
+            )
+        else:
+            text = "SOUNDS: horse hooves, cinematic strings\nSAM_PROMPT: horse hooves"
         return {
             "model_id": "mock/audio-flamingo-next",
             "audio_path": str(audio_path),
             "prompt": prompt,
-            "text": "SOUNDS: horse hooves, cinematic strings\nSAM_PROMPT: horse hooves",
+            "text": text,
         }
 
     def mock_sam_audio(self, audio_path: Path, prompt: str, output_prefix: str, job_id: str | None = None) -> dict[str, Any]:
@@ -919,6 +2143,16 @@ class PipelineRuntime:
             "zip": path_ref(str(zip_path), self.config.output_dir),
         }
 
+    @staticmethod
+    def preferred_audio_path(refs: dict[str, Any]) -> str | None:
+        for key in ("wav", "mp3"):
+            value = refs.get(key)
+            if isinstance(value, dict) and value.get("path"):
+                return str(value["path"])
+        if refs.get("path"):
+            return str(refs["path"])
+        return None
+
     def extract_sam_prompt(self, text: str) -> str:
         match = re.search(r"SAM_PROMPT\s*:\s*(.+)", text, flags=re.IGNORECASE | re.DOTALL)
         if not match:
@@ -927,6 +2161,39 @@ class PipelineRuntime:
         if not prompt:
             raise ValueError(f"Audio Flamingo response had an empty SAM_PROMPT: {text}")
         return prompt[:180]
+
+    def parse_sfx_list_text(self, text: str) -> tuple[dict[str, Any] | None, str | None]:
+        candidate = text.strip()
+        fenced = re.search(r"```(?:json)?\s*(.*?)\s*```", candidate, flags=re.IGNORECASE | re.DOTALL)
+        if fenced:
+            candidate = fenced.group(1).strip()
+        elif "{" in candidate and "}" in candidate:
+            candidate = candidate[candidate.find("{") : candidate.rfind("}") + 1]
+
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError as exc:
+            return None, f"Invalid JSON: {exc.msg}"
+
+        effects = parsed.get("effects") if isinstance(parsed, dict) else None
+        if not isinstance(effects, list):
+            return None, "Expected JSON object with an effects list"
+
+        normalized_effects: list[dict[str, str]] = []
+        for effect in effects:
+            if not isinstance(effect, dict):
+                continue
+            label = str(effect.get("label") or "").strip()
+            sam_prompt = str(effect.get("sam_prompt") or "").strip()
+            explanation = str(effect.get("explanation") or "").strip()
+            normalized_effects.append(
+                {
+                    "label": label,
+                    "sam_prompt": sam_prompt,
+                    "explanation": explanation,
+                }
+            )
+        return {"effects": normalized_effects}, None
 
     def chunk(self, chunk_id: str) -> dict[str, Any]:
         with self.connect() as conn:
@@ -943,11 +2210,15 @@ class PipelineRuntime:
             chunks = [dict(row) for row in conn.execute("SELECT * FROM chunks WHERE job_id = ? ORDER BY chunk_index", (job_id,))]
             tasks = [self._task_row(row) for row in conn.execute("SELECT * FROM tasks WHERE job_id = ? ORDER BY created_at", (job_id,))]
             stems = [self._stem_row(row) for row in conn.execute("SELECT * FROM stems WHERE job_id = ? ORDER BY created_at DESC", (job_id,))]
+            artifacts = [
+                self._artifact_row(row)
+                for row in conn.execute("SELECT * FROM artifacts WHERE job_id = ? ORDER BY created_at DESC", (job_id,))
+            ]
             events = [
                 self._event_row(row)
                 for row in conn.execute("SELECT * FROM events WHERE job_id = ? ORDER BY created_at DESC, id DESC LIMIT 100", (job_id,))
             ]
-        return {"job": dict(job), "chunks": chunks, "tasks": tasks, "stems": stems, "events": events}
+        return {"job": dict(job), "chunks": chunks, "tasks": tasks, "stems": stems, "artifacts": artifacts, "events": events}
 
     def dashboard_summary(self) -> dict[str, Any]:
         with self.connect() as conn:
@@ -955,6 +2226,7 @@ class PipelineRuntime:
                 "jobs": conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0],
                 "chunks": conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0],
                 "stems": conn.execute("SELECT COUNT(*) FROM stems").fetchone()[0],
+                "artifacts": conn.execute("SELECT COUNT(*) FROM artifacts").fetchone()[0],
             }
             job_counts = {"queued": 0, "running": 0, "complete": 0, STATUS_FAILED: 0}
             for row in conn.execute("SELECT status, COUNT(*) AS count FROM jobs GROUP BY status"):
@@ -975,13 +2247,37 @@ class PipelineRuntime:
             for row in conn.execute("SELECT queue, status, COUNT(*) AS count FROM tasks GROUP BY queue, status"):
                 queue_counts.setdefault(row["queue"], {})[row["status"]] = row["count"]
 
+            purpose_counts = {
+                purpose: {STATUS_PENDING: 0, STATUS_RUNNING: 0, STATUS_FAILED: 0, STATUS_COMPLETED: 0}
+                for purpose in PURPOSES
+            }
+            for row in conn.execute("SELECT queue, status, payload_json FROM tasks"):
+                payload = json_loads(row["payload_json"], {})
+                purpose = payload.get("purpose")
+                if not purpose:
+                    purpose = {
+                        TASK_SOUND_GATE: PURPOSE_CHUNK_SOUND_GATE,
+                        TASK_AUDIO_FLAMINGO: PURPOSE_DESCRIBE_SFX,
+                        TASK_SAM_AUDIO: PURPOSE_SEPARATE_SFX,
+                    }.get(row["queue"], row["queue"])
+                purpose_counts.setdefault(
+                    purpose,
+                    {STATUS_PENDING: 0, STATUS_RUNNING: 0, STATUS_FAILED: 0, STATUS_COMPLETED: 0},
+                )
+                purpose_counts[purpose][row["status"]] = purpose_counts[purpose].get(row["status"], 0) + 1
+
             recent_jobs = [
                 dict(row)
                 for row in conn.execute(
                     """
                     SELECT
                         j.*,
-                        SUM(CASE WHEN c.stage = 'complete' THEN 1 ELSE 0 END) AS complete_chunks,
+                        SUM(CASE WHEN c.stage IN (
+                            'complete', 'skipped_silent', 'music_ready', 'music_described',
+                            'sfx_voice_ready', 'voice_transcribed', 'sfx_ready',
+                            'sfx_exhausted', 'sfx_iteration_limit', 'sfx_loop_failed',
+                            'skipped_music', 'skipped_sfx_voice', 'skipped_voice', 'skipped_sfx'
+                        ) THEN 1 ELSE 0 END) AS complete_chunks,
                         SUM(CASE WHEN c.stage = 'failed' THEN 1 ELSE 0 END) AS failed_chunks
                     FROM jobs j
                     LEFT JOIN chunks c ON c.job_id = j.id
@@ -997,7 +2293,7 @@ class PipelineRuntime:
                     """
                     SELECT t.*, c.chunk_index, c.audio_path AS chunk_audio_path
                     FROM tasks t
-                    JOIN chunks c ON c.id = t.chunk_id
+                    LEFT JOIN chunks c ON c.id = t.chunk_id
                     WHERE t.status = ?
                     ORDER BY t.updated_at DESC
                     LIMIT 20
@@ -1017,8 +2313,22 @@ class PipelineRuntime:
                     """
                 )
             ]
+            artifacts = [
+                self._artifact_row(row)
+                for row in conn.execute(
+                    """
+                    SELECT a.*, c.chunk_index
+                    FROM artifacts a
+                    LEFT JOIN chunks c ON c.id = a.chunk_id
+                    ORDER BY a.created_at DESC
+                    LIMIT 30
+                    """
+                )
+            ]
+            performance = self.performance_summary(conn)
         return {
             "backend": self.config.backend,
+            "storage_backend": self.storage.backend,
             "db_path": str(self.config.db_path),
             "output_dir": str(self.config.output_dir),
             "totals": totals,
@@ -1026,9 +2336,12 @@ class PipelineRuntime:
             "tasks": task_counts,
             "stages": stage_counts,
             "queues": queue_counts,
+            "purposes": purpose_counts,
+            "performance": performance,
             "recent_jobs": recent_jobs,
             "recent_failures": failures,
-            "recent_outputs": outputs,
+            "recent_outputs": artifacts,
+            "recent_stems": outputs,
         }
 
     def _task_row(self, row: sqlite3.Row) -> dict[str, Any]:
@@ -1049,6 +2362,14 @@ class PipelineRuntime:
             "mp3": path_ref(data.get("residual_mp3"), self.config.output_dir),
         }
         data["zip"] = path_ref(data.get("zip_path"), self.config.output_dir)
+        return data
+
+    def _artifact_row(self, row: sqlite3.Row) -> dict[str, Any]:
+        data = dict(row)
+        data["metadata"] = json_loads(data.pop("metadata_json", None), {})
+        data["storage_ref"] = data["metadata"].get("storage") if isinstance(data["metadata"], dict) else None
+        data["local_path_ref"] = path_ref(data.get("path"), self.config.output_dir)
+        data["path_ref"] = data["storage_ref"] or data["local_path_ref"]
         return data
 
     def _event_row(self, row: sqlite3.Row) -> dict[str, Any]:
@@ -1104,10 +2425,12 @@ DASHBOARD_HTML = """<!doctype html>
     .status-pill strong { color: var(--ink); font-size: 13px; }
     .flow-board { padding: 0; }
     .flow-wrap { overflow-x: auto; background: linear-gradient(#fff, #fbfcfd); }
-    .flow-graph { display: block; width: 100%; min-width: 0; height: auto; max-height: 520px; }
+    .flow-graph { display: block; width: 100%; min-width: 0; height: auto; max-height: 700px; }
     .flow-title { font-size: 15px; font-weight: 700; fill: var(--ink); }
     .flow-subtitle { font-size: 12px; fill: var(--muted); }
     .flow-small { font-size: 11px; fill: var(--muted); }
+    .flow-edge-label { font-size: 11px; font-weight: 650; fill: var(--red); }
+    .flow-edge-label.good { fill: var(--green); }
     .arrow { fill: none; stroke: var(--red); stroke-width: 2.1; marker-end: url(#arrow); }
     .arrow.soft { stroke-dasharray: 5 6; opacity: 0.75; }
     .arrow.green { stroke: var(--green); }
@@ -1169,85 +2492,222 @@ DASHBOARD_HTML = """<!doctype html>
         <div class="status-strip" id="summary"></div>
       </div>
       <div class="flow-wrap">
-        <svg id="flow-graph" class="flow-graph" viewBox="0 0 1052 404" role="img" aria-label="Pipeline status graph">
+        <svg id="flow-graph" class="flow-graph" viewBox="0 0 2300 760" role="img" aria-label="Pipeline status graph">
           <defs>
             <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
               <path d="M0,0 L0,6 L9,3 z" fill="#ef4444"></path>
             </marker>
           </defs>
 
-          <g transform="scale(0.72)">
-          <path class="arrow" d="M105 276 C132 276 142 276 165 276"></path>
-          <path class="arrow" d="M315 276 C336 276 350 276 371 276"></path>
-          <path class="arrow" d="M496 276 C525 276 540 246 578 246"></path>
-          <path class="arrow soft" d="M444 356 C520 432 822 444 1042 444"></path>
-          <path class="arrow" d="M744 246 C783 246 804 276 838 276"></path>
-          <path class="arrow green" d="M1004 276 C1042 256 1062 220 1096 188"></path>
-          <path class="arrow soft" d="M1004 305 C1098 350 1166 404 1252 426"></path>
-          <path class="arrow soft" d="M693 310 C814 414 1042 482 1252 466"></path>
-          <path class="arrow soft" d="M432 196 C518 72 890 80 1098 134"></path>
+          <path class="arrow" d="M100 265 C120 265 130 265 150 265"></path>
+          <path class="arrow" d="M340 265 C352 265 360 265 374 265"></path>
+          <path class="arrow" d="M506 265 C534 265 556 262 590 262"></path>
+          <path class="arrow green" d="M780 238 C812 218 824 192 846 170"></path>
+          <path class="arrow green" d="M780 302 C812 324 824 346 846 360"></path>
+          <path class="arrow soft" d="M100 236 C140 166 184 118 245 104"></path>
+          <path class="arrow soft" d="M425 104 C760 42 1280 56 1648 142"></path>
+          <path class="arrow soft" d="M980 170 C1016 156 1030 140 1052 134"></path>
+          <path class="arrow green" d="M1198 144 C1210 148 1214 158 1218 168"></path>
+          <path class="arrow soft" d="M980 360 C1018 364 1036 368 1058 372"></path>
+          <path class="arrow soft" d="M946 242 C995 334 1032 396 1065 438"></path>
+          <path class="arrow soft" d="M946 432 C982 454 1018 462 1058 466"></path>
+          <path class="arrow soft" d="M446 370 C590 472 874 492 1058 466"></path>
+          <path class="arrow soft" d="M1198 372 C1244 392 1284 420 1322 440"></path>
+          <text class="flow-edge-label good" x="1190" y="135">music track</text>
+          <text class="flow-edge-label" x="620" y="466">empty</text>
+          <text class="flow-edge-label" x="1000" y="344">empty</text>
+          <text class="flow-edge-label" x="992" y="488">empty</text>
+          <path class="arrow green" d="M1198 134 C1214 126 1228 119 1242 112"></path>
+          <path class="arrow soft" d="M1438 112 C1518 116 1582 130 1648 154"></path>
+          <path class="arrow green" d="M1198 372 C1220 372 1234 372 1256 372"></path>
+          <path class="arrow green" d="M1438 342 C1464 318 1480 300 1504 278"></path>
+          <path class="arrow green" d="M1438 402 C1464 426 1480 444 1504 466"></path>
+          <path class="arrow" d="M1596 278 C1622 270 1640 292 1658 320"></path>
+          <path class="arrow soft" d="M1768 320 C1762 280 1746 246 1718 226"></path>
+          <path class="arrow soft" d="M1596 466 C1635 456 1672 452 1712 450"></path>
+          <path class="arrow soft" d="M1550 348 C1440 454 1298 486 1200 466"></path>
+          <path class="arrow soft" d="M1550 536 C1420 560 1280 526 1200 466"></path>
+          <text class="flow-edge-label good" x="1450" y="102">music description</text>
+          <text class="flow-edge-label good" x="1442" y="318">voice track</text>
+          <text class="flow-edge-label good" x="1448" y="452">sfx track</text>
+          <text class="flow-edge-label good" x="1620" y="304">voice transcription</text>
+          <text class="flow-edge-label" x="1468" y="372">empty</text>
+          <text class="flow-edge-label" x="1458" y="554">empty</text>
+          <path class="arrow green" d="M1830 450 C1850 446 1872 440 1900 430"></path>
+          <path class="arrow green" d="M2090 400 C2102 400 2110 400 2122 400"></path>
+          <path class="arrow" d="M2208 458 C2202 478 2198 494 2193 512"></path>
+          <path class="arrow green" d="M2128 590 C2040 588 1978 536 1978 462"></path>
+          <path class="arrow soft" d="M2128 624 C1780 690 1400 620 1198 466"></path>
+          <text class="flow-edge-label good" x="1846" y="430">sfx track</text>
+          <text class="flow-edge-label" x="2042" y="384">pick first sfx</text>
+          <text class="flow-edge-label" x="2050" y="568">remaining sfx</text>
+          <text class="flow-edge-label" x="1880" y="586">repeat</text>
+          <text class="flow-edge-label" x="1768" y="672">empty/exhausted</text>
 
           <g class="flow-node kind-input selected" tabindex="0" data-node="source">
-            <rect class="node-shape" x="34" y="220" width="72" height="112" rx="14"></rect>
-            <text class="flow-title" x="70" y="265" text-anchor="middle">Audio</text>
-            <text class="flow-title" x="70" y="286" text-anchor="middle">track</text>
-            <g class="count-badge" data-badge="source" transform="translate(108 216)"><rect class="badge-bg" x="-18" y="-15" width="36" height="30" rx="15"></rect><text class="badge-text">0</text></g>
+            <rect class="node-shape" x="30" y="210" width="70" height="110" rx="14"></rect>
+            <text class="flow-title" x="65" y="255" text-anchor="middle">Audio</text>
+            <text class="flow-title" x="65" y="276" text-anchor="middle">track</text>
+            <g class="count-badge" data-badge="source" transform="translate(104 205)"><rect class="badge-bg" x="-18" y="-15" width="36" height="30" rx="15"></rect><text class="badge-text">0</text></g>
+          </g>
+
+          <g class="flow-node kind-model" tabindex="0" data-node="describe_scene">
+            <rect class="node-shape" x="245" y="50" width="180" height="108" rx="12"></rect>
+            <text class="flow-title" x="335" y="92" text-anchor="middle">describe whole</text>
+            <text class="flow-title" x="335" y="114" text-anchor="middle">scene</text>
+            <text class="flow-small" data-node-meta="describe_scene" x="335" y="178" text-anchor="middle">waiting 0 · running 0</text>
+            <g class="count-badge" data-badge="describe_scene" transform="translate(428 48)"><rect class="badge-bg" x="-18" y="-15" width="36" height="30" rx="15"></rect><text class="badge-text">0</text></g>
           </g>
 
           <g class="flow-node kind-chunk" tabindex="0" data-node="chunks">
-            <rect class="node-shape" x="165" y="216" width="150" height="120" rx="13"></rect>
-            <text class="flow-title" x="240" y="268" text-anchor="middle">30s chunks</text>
-            <text class="flow-subtitle" x="240" y="292" text-anchor="middle">5s overlap</text>
-            <g class="count-badge" data-badge="chunks" transform="translate(316 212)"><rect class="badge-bg" x="-18" y="-15" width="36" height="30" rx="15"></rect><text class="badge-text">0</text></g>
+            <rect class="node-shape" x="150" y="200" width="190" height="130" rx="13"></rect>
+            <text class="flow-title" x="245" y="256" text-anchor="middle">30s chunks</text>
+            <text class="flow-subtitle" x="245" y="282" text-anchor="middle">5s overlap</text>
+            <g class="count-badge" data-badge="chunks" transform="translate(340 196)"><rect class="badge-bg" x="-18" y="-15" width="36" height="30" rx="15"></rect><text class="badge-text">0</text></g>
           </g>
 
           <g class="flow-node kind-gate" tabindex="0" data-node="sound_gate">
-            <polygon class="node-shape" points="432,184 496,276 432,368 368,276"></polygon>
-            <text class="flow-title" x="432" y="258" text-anchor="middle">sound</text>
-            <text class="flow-title" x="432" y="278" text-anchor="middle">gate</text>
-            <text class="flow-subtitle" x="432" y="299" text-anchor="middle">filter</text>
-            <text class="flow-small" data-node-meta="sound_gate" x="432" y="392" text-anchor="middle">waiting 0</text>
-            <g class="count-badge" data-badge="sound_gate" transform="translate(493 204)"><rect class="badge-bg" x="-18" y="-15" width="36" height="30" rx="15"></rect><text class="badge-text">0</text></g>
+            <polygon class="node-shape" points="440,160 520,265 440,370 360,265"></polygon>
+            <text class="flow-title" x="440" y="246" text-anchor="middle">sound</text>
+            <text class="flow-title" x="440" y="268" text-anchor="middle">gate</text>
+            <text class="flow-subtitle" x="440" y="292" text-anchor="middle">filter</text>
+            <text class="flow-small" data-node-meta="sound_gate" x="440" y="396" text-anchor="middle">waiting 0 · running 0</text>
+            <g class="count-badge" data-badge="sound_gate" transform="translate(516 176)"><rect class="badge-bg" x="-18" y="-15" width="36" height="30" rx="15"></rect><text class="badge-text">0</text></g>
           </g>
 
-          <g class="flow-node kind-model" tabindex="0" data-node="describe_sfx">
-            <rect class="node-shape" x="578" y="194" width="166" height="104" rx="12"></rect>
-            <text class="flow-title" x="661" y="234" text-anchor="middle">describe SFX</text>
-            <text class="flow-subtitle" x="661" y="262" text-anchor="middle">audio_flamingo</text>
-            <text class="flow-small" data-node-meta="describe_sfx" x="661" y="316" text-anchor="middle">waiting 0</text>
-            <g class="count-badge" data-badge="describe_sfx" transform="translate(745 190)"><rect class="badge-bg" x="-18" y="-15" width="36" height="30" rx="15"></rect><text class="badge-text">0</text></g>
+          <g class="flow-node kind-work" tabindex="0" data-node="separate_music">
+            <rect class="node-shape" x="590" y="190" width="190" height="145" rx="12"></rect>
+            <text class="flow-title" x="685" y="253" text-anchor="middle">separate music</text>
+            <text class="flow-subtitle" x="685" y="282" text-anchor="middle">sam_audio</text>
+            <text class="flow-small" data-node-meta="separate_music" x="685" y="356" text-anchor="middle">waiting 0 · running 0</text>
+            <g class="count-badge" data-badge="separate_music" transform="translate(782 186)"><rect class="badge-bg" x="-18" y="-15" width="36" height="30" rx="15"></rect><text class="badge-text">0</text></g>
+          </g>
+
+          <g class="flow-node kind-gate" tabindex="0" data-node="gate_music">
+            <polygon class="node-shape" points="910,80 980,170 910,260 840,170"></polygon>
+            <text class="flow-title" x="910" y="152" text-anchor="middle">music</text>
+            <text class="flow-subtitle" x="910" y="174" text-anchor="middle">sound gate</text>
+            <text class="flow-small" data-node-meta="gate_music" x="910" y="282" text-anchor="middle">waiting 0 · running 0</text>
+            <g class="count-badge" data-badge="gate_music" transform="translate(976 92)"><rect class="badge-bg" x="-18" y="-15" width="36" height="30" rx="15"></rect><text class="badge-text">0</text></g>
+          </g>
+
+          <g class="flow-node kind-gate" tabindex="0" data-node="gate_sfx_voice">
+            <polygon class="node-shape" points="910,270 980,360 910,450 840,360"></polygon>
+            <text class="flow-title" x="910" y="342" text-anchor="middle">sfx+voice</text>
+            <text class="flow-subtitle" x="910" y="364" text-anchor="middle">sound gate</text>
+            <text class="flow-small" data-node-meta="gate_sfx_voice" x="910" y="472" text-anchor="middle">waiting 0 · running 0</text>
+            <g class="count-badge" data-badge="gate_sfx_voice" transform="translate(976 282)"><rect class="badge-bg" x="-18" y="-15" width="36" height="30" rx="15"></rect><text class="badge-text">0</text></g>
+          </g>
+
+          <g class="flow-node kind-db" tabindex="0" data-node="artifacts_db">
+            <circle class="node-shape" cx="1720" cy="158" r="72"></circle>
+            <text class="flow-title" x="1720" y="124" text-anchor="middle">ARTIFACTS</text>
+            <text class="flow-title" x="1720" y="146" text-anchor="middle">DB</text>
+            <text class="flow-subtitle" x="1720" y="174" text-anchor="middle">scene + track</text>
+            <text class="flow-subtitle" x="1720" y="195" text-anchor="middle">refs</text>
+            <g class="count-badge" data-badge="artifacts_db" transform="translate(1788 100)"><rect class="badge-bg" x="-18" y="-15" width="36" height="30" rx="15"></rect><text class="badge-text">0</text></g>
+          </g>
+
+          <g class="flow-node kind-terminal" tabindex="0" data-node="music_ready">
+            <rect class="node-shape" x="1052" y="92" width="146" height="84" rx="12"></rect>
+            <text class="flow-title" x="1125" y="128" text-anchor="middle">music</text>
+            <text class="flow-subtitle" x="1125" y="152" text-anchor="middle">ready</text>
+            <g class="count-badge" data-badge="music_ready" transform="translate(1198 88)"><rect class="badge-bg" x="-18" y="-15" width="36" height="30" rx="15"></rect><text class="badge-text">0</text></g>
+          </g>
+
+          <g class="flow-node kind-model" tabindex="0" data-node="describe_music">
+            <rect class="node-shape" x="1240" y="58" width="198" height="108" rx="12"></rect>
+            <text class="flow-title" x="1339" y="102" text-anchor="middle">describe music</text>
+            <text class="flow-subtitle" x="1339" y="130" text-anchor="middle">audio_flamingo_next</text>
+            <text class="flow-small" data-node-meta="describe_music" x="1339" y="186" text-anchor="middle">waiting 0 · running 0</text>
+            <g class="count-badge" data-badge="describe_music" transform="translate(1438 54)"><rect class="badge-bg" x="-18" y="-15" width="36" height="30" rx="15"></rect><text class="badge-text">0</text></g>
+          </g>
+
+          <g class="flow-node kind-terminal" tabindex="0" data-node="sfx_voice_ready">
+            <rect class="node-shape" x="1058" y="330" width="140" height="84" rx="12"></rect>
+            <text class="flow-title" x="1128" y="365" text-anchor="middle">sfx+voice</text>
+            <text class="flow-subtitle" x="1128" y="390" text-anchor="middle">ready</text>
+            <g class="count-badge" data-badge="sfx_voice_ready" transform="translate(1198 326)"><rect class="badge-bg" x="-18" y="-15" width="36" height="30" rx="15"></rect><text class="badge-text">0</text></g>
+          </g>
+
+          <g class="flow-node kind-work" tabindex="0" data-node="separate_voices">
+            <rect class="node-shape" x="1256" y="302" width="182" height="140" rx="12"></rect>
+            <text class="flow-title" x="1347" y="362" text-anchor="middle">separate voices</text>
+            <text class="flow-subtitle" x="1347" y="390" text-anchor="middle">sam_audio</text>
+            <text class="flow-small" data-node-meta="separate_voices" x="1347" y="462" text-anchor="middle">waiting 0 · running 0</text>
+            <g class="count-badge" data-badge="separate_voices" transform="translate(1438 298)"><rect class="badge-bg" x="-18" y="-15" width="36" height="30" rx="15"></rect><text class="badge-text">0</text></g>
+          </g>
+
+          <g class="flow-node kind-gate" tabindex="0" data-node="gate_voice">
+            <polygon class="node-shape" points="1550,198 1616,278 1550,358 1484,278"></polygon>
+            <text class="flow-title" x="1550" y="263" text-anchor="middle">voice</text>
+            <text class="flow-subtitle" x="1550" y="286" text-anchor="middle">sound gate</text>
+            <text class="flow-small" data-node-meta="gate_voice" x="1550" y="380" text-anchor="middle">waiting 0 · running 0</text>
+            <g class="count-badge" data-badge="gate_voice" transform="translate(1616 210)"><rect class="badge-bg" x="-18" y="-15" width="36" height="30" rx="15"></rect><text class="badge-text">0</text></g>
+          </g>
+
+          <g class="flow-node kind-gate" tabindex="0" data-node="gate_sfx">
+            <polygon class="node-shape" points="1550,386 1616,466 1550,546 1484,466"></polygon>
+            <text class="flow-title" x="1550" y="451" text-anchor="middle">sfx</text>
+            <text class="flow-subtitle" x="1550" y="474" text-anchor="middle">sound gate</text>
+            <text class="flow-small" data-node-meta="gate_sfx" x="1550" y="568" text-anchor="middle">waiting 0 · running 0</text>
+            <g class="count-badge" data-badge="gate_sfx" transform="translate(1616 398)"><rect class="badge-bg" x="-18" y="-15" width="36" height="30" rx="15"></rect><text class="badge-text">0</text></g>
+          </g>
+
+          <g class="flow-node kind-model" tabindex="0" data-node="transcribe_voice">
+            <rect class="node-shape" x="1658" y="286" width="210" height="108" rx="12"></rect>
+            <text class="flow-title" x="1763" y="326" text-anchor="middle">transcribe</text>
+            <text class="flow-title" x="1763" y="348" text-anchor="middle">with diarization</text>
+            <text class="flow-subtitle" x="1763" y="374" text-anchor="middle">audio_flamingo_next</text>
+            <text class="flow-small" data-node-meta="transcribe_voice" x="1763" y="414" text-anchor="middle">waiting 0 · running 0</text>
+            <g class="count-badge" data-badge="transcribe_voice" transform="translate(1868 282)"><rect class="badge-bg" x="-18" y="-15" width="36" height="30" rx="15"></rect><text class="badge-text">0</text></g>
+          </g>
+
+          <g class="flow-node kind-terminal" tabindex="0" data-node="sfx_ready">
+            <rect class="node-shape" x="1712" y="408" width="118" height="84" rx="12"></rect>
+            <text class="flow-title" x="1771" y="443" text-anchor="middle">sfx</text>
+            <text class="flow-subtitle" x="1771" y="468" text-anchor="middle">ready</text>
+            <g class="count-badge" data-badge="sfx_ready" transform="translate(1830 404)"><rect class="badge-bg" x="-18" y="-15" width="36" height="30" rx="15"></rect><text class="badge-text">0</text></g>
+          </g>
+
+          <g class="flow-node kind-model" tabindex="0" data-node="list_sfx">
+            <rect class="node-shape" x="1900" y="342" width="190" height="118" rx="12"></rect>
+            <text class="flow-title" x="1995" y="389" text-anchor="middle">list sound</text>
+            <text class="flow-title" x="1995" y="411" text-anchor="middle">effects</text>
+            <text class="flow-subtitle" x="1995" y="438" text-anchor="middle">audio_flamingo_next</text>
+            <text class="flow-small" data-node-meta="list_sfx" x="1995" y="480" text-anchor="middle">waiting 0 · running 0</text>
+            <g class="count-badge" data-badge="list_sfx" transform="translate(2090 338)"><rect class="badge-bg" x="-18" y="-15" width="36" height="30" rx="15"></rect><text class="badge-text">0</text></g>
           </g>
 
           <g class="flow-node kind-work" tabindex="0" data-node="separate_sfx">
-            <rect class="node-shape" x="838" y="216" width="166" height="120" rx="12"></rect>
-            <text class="flow-title" x="921" y="268" text-anchor="middle">separate SFX</text>
-            <text class="flow-subtitle" x="921" y="294" text-anchor="middle">sam_audio</text>
-            <text class="flow-small" data-node-meta="separate_sfx" x="921" y="358" text-anchor="middle">waiting 0</text>
-            <g class="count-badge" data-badge="separate_sfx" transform="translate(1005 212)"><rect class="badge-bg" x="-18" y="-15" width="36" height="30" rx="15"></rect><text class="badge-text">0</text></g>
+            <rect class="node-shape" x="2122" y="342" width="170" height="116" rx="12"></rect>
+            <text class="flow-title" x="2207" y="392" text-anchor="middle">separate sfx</text>
+            <text class="flow-subtitle" x="2207" y="420" text-anchor="middle">sam_audio</text>
+            <text class="flow-small" data-node-meta="separate_sfx" x="2207" y="478" text-anchor="middle">waiting 0 · running 0</text>
+            <g class="count-badge" data-badge="separate_sfx" transform="translate(2270 338)"><rect class="badge-bg" x="-18" y="-15" width="36" height="30" rx="15"></rect><text class="badge-text">0</text></g>
           </g>
 
-          <g class="flow-node kind-db" tabindex="0" data-node="stems_db">
-            <circle class="node-shape" cx="1166" cy="158" r="78"></circle>
-            <text class="flow-title" x="1166" y="128" text-anchor="middle">STEMS</text>
-            <text class="flow-title" x="1166" y="150" text-anchor="middle">DB</text>
-            <text class="flow-subtitle" x="1166" y="178" text-anchor="middle">target + residual</text>
-            <text class="flow-subtitle" x="1166" y="199" text-anchor="middle">refs</text>
-            <g class="count-badge" data-badge="stems_db" transform="translate(1238 100)"><rect class="badge-bg" x="-18" y="-15" width="36" height="30" rx="15"></rect><text class="badge-text">0</text></g>
+          <g class="flow-node kind-gate" tabindex="0" data-node="gate_remaining_sfx">
+            <polygon class="node-shape" points="2190,512 2255,590 2190,668 2125,590"></polygon>
+            <text class="flow-title" x="2190" y="574" text-anchor="middle">remaining</text>
+            <text class="flow-title" x="2190" y="596" text-anchor="middle">sfx</text>
+            <text class="flow-subtitle" x="2190" y="618" text-anchor="middle">sound gate</text>
+            <text class="flow-small" data-node-meta="gate_remaining_sfx" x="2190" y="690" text-anchor="middle">waiting 0 · running 0</text>
+            <g class="count-badge" data-badge="gate_remaining_sfx" transform="translate(2255 526)"><rect class="badge-bg" x="-18" y="-15" width="36" height="30" rx="15"></rect><text class="badge-text">0</text></g>
           </g>
 
-          <g class="flow-node kind-terminal" tabindex="0" data-node="skipped_silent">
-            <rect class="node-shape" x="1042" y="402" width="152" height="84" rx="12"></rect>
-            <text class="flow-title" x="1118" y="438" text-anchor="middle">skipped</text>
-            <text class="flow-subtitle" x="1118" y="462" text-anchor="middle">silent chunk</text>
-            <g class="count-badge" data-badge="skipped_silent" transform="translate(1195 398)"><rect class="badge-bg" x="-18" y="-15" width="36" height="30" rx="15"></rect><text class="badge-text">0</text></g>
+          <g class="flow-node kind-terminal" tabindex="0" data-node="skipped">
+            <rect class="node-shape" x="1058" y="430" width="140" height="70" rx="12"></rect>
+            <text class="flow-title" x="1128" y="458" text-anchor="middle">skipped</text>
+            <text class="flow-subtitle" x="1128" y="481" text-anchor="middle">empty audio</text>
+            <g class="count-badge" data-badge="skipped" transform="translate(1198 426)"><rect class="badge-bg" x="-18" y="-15" width="36" height="30" rx="15"></rect><text class="badge-text">0</text></g>
           </g>
 
           <g class="flow-node kind-failed" tabindex="0" data-node="failed">
-            <rect class="node-shape" x="1252" y="410" width="132" height="82" rx="12"></rect>
-            <text class="flow-title" x="1318" y="447" text-anchor="middle">failed</text>
-            <text class="flow-subtitle" x="1318" y="470" text-anchor="middle">retryable</text>
-            <g class="count-badge" data-badge="failed" transform="translate(1385 406)"><rect class="badge-bg" x="-18" y="-15" width="36" height="30" rx="15"></rect><text class="badge-text">0</text></g>
-          </g>
+            <rect class="node-shape" x="1776" y="590" width="86" height="56" rx="12"></rect>
+            <text class="flow-title" x="1819" y="614" text-anchor="middle">failed</text>
+            <text class="flow-subtitle" x="1819" y="636" text-anchor="middle">retry</text>
+            <g class="count-badge" data-badge="failed" transform="translate(1862 586)"><rect class="badge-bg" x="-18" y="-15" width="36" height="30" rx="15"></rect><text class="badge-text">0</text></g>
           </g>
         </svg>
       </div>
@@ -1283,12 +2743,25 @@ DASHBOARD_HTML = """<!doctype html>
   <script>
     const FLOW_NODES = {
       source: { title: 'Audio Track', kind: 'Input', badge: 'jobs' },
+      describe_scene: { title: 'Describe Whole Scene', kind: 'Queue: audio_flamingo', badge: 'waiting' },
       chunks: { title: 'Chunk Splitter', kind: 'Preprocess', badge: 'chunks' },
       sound_gate: { title: 'Sound Gate Filter', kind: 'Queue: sound_gate', badge: 'waiting' },
-      describe_sfx: { title: 'Describe SFX', kind: 'Queue: audio_flamingo', badge: 'waiting' },
+      separate_music: { title: 'Separate Music', kind: 'Queue: sam_audio', badge: 'waiting' },
+      gate_music: { title: 'Music Sound Gate', kind: 'Queue: sound_gate', badge: 'waiting' },
+      gate_sfx_voice: { title: 'SFX+Voice Sound Gate', kind: 'Queue: sound_gate', badge: 'waiting' },
+      describe_music: { title: 'Describe Music', kind: 'Queue: audio_flamingo', badge: 'waiting' },
+      separate_voices: { title: 'Separate Voices', kind: 'Queue: sam_audio', badge: 'waiting' },
+      gate_voice: { title: 'Voice Sound Gate', kind: 'Queue: sound_gate', badge: 'waiting' },
+      gate_sfx: { title: 'SFX Sound Gate', kind: 'Queue: sound_gate', badge: 'waiting' },
+      transcribe_voice: { title: 'Transcribe With Diarization', kind: 'Queue: audio_flamingo', badge: 'waiting' },
+      list_sfx: { title: 'List Sound Effects', kind: 'Queue: audio_flamingo', badge: 'waiting' },
       separate_sfx: { title: 'Separate SFX', kind: 'Queue: sam_audio', badge: 'waiting' },
-      stems_db: { title: 'Stems DB', kind: 'Output refs', badge: 'stems' },
-      skipped_silent: { title: 'Skipped Silent', kind: 'Terminal stage', badge: 'chunks' },
+      gate_remaining_sfx: { title: 'Remaining SFX Sound Gate', kind: 'Queue: sound_gate', badge: 'waiting' },
+      music_ready: { title: 'Music Ready', kind: 'Terminal stage', badge: 'chunks' },
+      sfx_voice_ready: { title: 'SFX+Voice Ready', kind: 'Terminal stage', badge: 'chunks' },
+      sfx_ready: { title: 'SFX Ready', kind: 'Terminal stage', badge: 'chunks' },
+      artifacts_db: { title: 'Artifacts DB', kind: 'Output refs', badge: 'artifacts' },
+      skipped: { title: 'Skipped Empty Audio', kind: 'Terminal stage', badge: 'chunks' },
       failed: { title: 'Failed', kind: 'Retryable work', badge: 'failures' },
     };
     let selectedNode = 'source';
@@ -1298,7 +2771,61 @@ DASHBOARD_HTML = """<!doctype html>
     const esc = value => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
     const link = ref => ref && ref.url ? `<a href="${esc(ref.url)}"><code>${esc(ref.path)}</code></a>` : (ref && ref.path ? `<code>${esc(ref.path)}</code>` : '');
     const queue = (data, name) => data.queues[name] || { pending: 0, running: 0, failed: 0, completed: 0 };
+    const purpose = (data, name) => data.purposes[name] || { pending: 0, running: 0, failed: 0, completed: 0 };
     const number = value => Number(value || 0);
+    const active = counts => number(counts.pending) + number(counts.running);
+    const NODE_PURPOSES = {
+      describe_scene: 'describe_scene',
+      sound_gate: 'chunk_sound_gate',
+      separate_music: 'separate_music',
+      gate_music: 'gate_music',
+      gate_sfx_voice: 'gate_sfx_voice',
+      describe_music: 'describe_music',
+      separate_voices: 'separate_voices',
+      gate_voice: 'gate_voice',
+      gate_sfx: 'gate_sfx',
+      transcribe_voice: 'transcribe_voice',
+      list_sfx: 'list_sfx',
+      separate_sfx: 'separate_sfx',
+      gate_remaining_sfx: 'gate_remaining_sfx',
+    };
+    const perfPurpose = (data, name) => ((data.performance || {}).purposes || {})[name] || {};
+    const perfQueue = (data, name) => ((data.performance || {}).queues || {})[name] || {};
+    const perfOverall = data => ((data.performance || {}).overall || {});
+
+    function formatAudioPerMinute(metric) {
+      const value = number(metric && metric.audio_seconds_per_minute);
+      if (!value) return '—';
+      if (value >= 60) return `${(value / 60).toFixed(value >= 600 ? 0 : 1)}m/min`;
+      return `${value.toFixed(value >= 10 ? 0 : 1)}s/min`;
+    }
+
+    function formatSeconds(value) {
+      const seconds = number(value);
+      if (!seconds) return '—';
+      if (seconds < 1) return `${Math.round(seconds * 1000)}ms`;
+      return `${seconds.toFixed(seconds >= 10 ? 1 : 2)}s`;
+    }
+
+    function formatRealtime(metric) {
+      const value = number(metric && metric.realtime_factor);
+      return value ? `${value.toFixed(value >= 10 ? 1 : 2)}x` : '—';
+    }
+
+    function performanceForNode(data, nodeName) {
+      if (nodeName === 'source' || nodeName === 'chunks') return perfOverall(data);
+      const purposeName = NODE_PURPOSES[nodeName];
+      return purposeName ? perfPurpose(data, purposeName) : {};
+    }
+
+    function performanceMetrics(metric) {
+      return [
+        ['Audio/min', formatAudioPerMinute(metric)],
+        ['Avg task', formatSeconds(metric.avg_task_seconds)],
+        ['Realtime', formatRealtime(metric)],
+        ['Samples', metric.completed_tasks || 0],
+      ];
+    }
 
     function rows(headers, items, cells) {
       return `<thead><tr>${headers.map(h => `<th>${h}</th>`).join('')}</tr></thead><tbody>${items.map(item => `<tr>${cells(item).join('')}</tr>`).join('') || `<tr><td colspan="${headers.length}">No rows</td></tr>`}</tbody>`;
@@ -1306,14 +2833,31 @@ DASHBOARD_HTML = """<!doctype html>
 
     function flowStats(data) {
       const jobs = data.jobs || { queued: 0, running: 0, complete: 0, failed: 0 };
-      const soundGate = queue(data, 'sound_gate');
-      const audioFlamingo = queue(data, 'audio_flamingo');
-      const samAudio = queue(data, 'sam_audio');
       const activeJobs = number(jobs.queued) + number(jobs.running);
-      const activeChunks = number(data.stages.sound_gate) + number(data.stages.describe_sfx) + number(data.stages.separate_sfx);
-      const soundGateActive = number(soundGate.pending) + number(soundGate.running);
-      const audioFlamingoActive = number(audioFlamingo.pending) + number(audioFlamingo.running);
-      const samAudioActive = number(samAudio.pending) + number(samAudio.running);
+      const scene = purpose(data, 'describe_scene');
+      const chunkGate = purpose(data, 'chunk_sound_gate');
+      const musicSplit = purpose(data, 'separate_music');
+      const musicGate = purpose(data, 'gate_music');
+      const sfxVoiceGate = purpose(data, 'gate_sfx_voice');
+      const describeMusic = purpose(data, 'describe_music');
+      const voiceSplit = purpose(data, 'separate_voices');
+      const voiceGate = purpose(data, 'gate_voice');
+      const sfxGate = purpose(data, 'gate_sfx');
+      const voiceTranscribe = purpose(data, 'transcribe_voice');
+      const listSfx = purpose(data, 'list_sfx');
+      const sfxSplit = purpose(data, 'separate_sfx');
+      const remainingSfxGate = purpose(data, 'gate_remaining_sfx');
+      const terminalChunks =
+        number(data.stages.complete) + number(data.stages.skipped_silent) +
+        number(data.stages.music_ready) + number(data.stages.music_described) +
+        number(data.stages.sfx_voice_ready) + number(data.stages.voice_transcribed) +
+        number(data.stages.sfx_ready) + number(data.stages.sfx_exhausted) +
+        number(data.stages.sfx_iteration_limit) + number(data.stages.sfx_loop_failed) +
+        number(data.stages.skipped_music) +
+        number(data.stages.skipped_sfx_voice) + number(data.stages.skipped_voice) +
+        number(data.stages.skipped_sfx) +
+        number(data.stages.failed);
+      const activeChunks = Math.max(0, number(data.totals.chunks) - terminalChunks);
       return {
         source: {
           badge: activeJobs,
@@ -1321,42 +2865,149 @@ DASHBOARD_HTML = """<!doctype html>
           failed: number(jobs.failed),
           metrics: [['Ongoing jobs', activeJobs], ['Queued jobs', jobs.queued], ['Running jobs', jobs.running], ['Failed jobs', jobs.failed]],
         },
+        describe_scene: {
+          badge: active(scene),
+          waiting: number(scene.pending),
+          running: number(scene.running),
+          failed: number(scene.failed),
+          done: number(scene.completed),
+          metrics: [['Ongoing', active(scene)], ['Waiting', scene.pending], ['Running', scene.running], ['Completed', scene.completed]],
+        },
         chunks: {
           badge: activeChunks,
           failed: number(data.stages.failed),
-          metrics: [['Ongoing chunks', activeChunks], ['Waiting gate', data.stages.sound_gate], ['Describing', data.stages.describe_sfx], ['Separating', data.stages.separate_sfx]],
+          metrics: [['Ongoing chunks', activeChunks], ['Waiting gate', data.stages.sound_gate], ['Separating music', data.stages.separate_music], ['Ready', data.stages.sfx_voice_ready]],
         },
         sound_gate: {
-          badge: soundGateActive,
-          waiting: number(soundGate.pending),
-          running: number(soundGate.running),
-          failed: number(soundGate.failed),
-          done: number(soundGate.completed),
-          metrics: [['Ongoing', soundGateActive], ['Waiting', soundGate.pending], ['Running', soundGate.running], ['Failed', soundGate.failed]],
+          badge: active(chunkGate),
+          waiting: number(chunkGate.pending),
+          running: number(chunkGate.running),
+          failed: number(chunkGate.failed),
+          done: number(chunkGate.completed),
+          metrics: [['Ongoing', active(chunkGate)], ['Waiting', chunkGate.pending], ['Running', chunkGate.running], ['Failed', chunkGate.failed]],
         },
-        describe_sfx: {
-          badge: audioFlamingoActive,
-          waiting: number(audioFlamingo.pending),
-          running: number(audioFlamingo.running),
-          failed: number(audioFlamingo.failed),
-          done: number(audioFlamingo.completed),
-          metrics: [['Ongoing', audioFlamingoActive], ['Waiting', audioFlamingo.pending], ['Running', audioFlamingo.running], ['Failed', audioFlamingo.failed]],
+        separate_music: {
+          badge: active(musicSplit),
+          waiting: number(musicSplit.pending),
+          running: number(musicSplit.running),
+          failed: number(musicSplit.failed),
+          done: number(musicSplit.completed),
+          metrics: [['Ongoing', active(musicSplit)], ['Waiting', musicSplit.pending], ['Running', musicSplit.running], ['Failed', musicSplit.failed]],
+        },
+        gate_music: {
+          badge: active(musicGate),
+          waiting: number(musicGate.pending),
+          running: number(musicGate.running),
+          failed: number(musicGate.failed),
+          done: number(musicGate.completed),
+          metrics: [['Ongoing', active(musicGate)], ['Waiting', musicGate.pending], ['Running', musicGate.running], ['Failed', musicGate.failed]],
+        },
+        gate_sfx_voice: {
+          badge: active(sfxVoiceGate),
+          waiting: number(sfxVoiceGate.pending),
+          running: number(sfxVoiceGate.running),
+          failed: number(sfxVoiceGate.failed),
+          done: number(sfxVoiceGate.completed),
+          metrics: [['Ongoing', active(sfxVoiceGate)], ['Waiting', sfxVoiceGate.pending], ['Running', sfxVoiceGate.running], ['Failed', sfxVoiceGate.failed]],
+        },
+        describe_music: {
+          badge: active(describeMusic),
+          waiting: number(describeMusic.pending),
+          running: number(describeMusic.running),
+          failed: number(describeMusic.failed),
+          done: number(describeMusic.completed),
+          metrics: [['Ongoing', active(describeMusic)], ['Waiting', describeMusic.pending], ['Running', describeMusic.running], ['Completed', describeMusic.completed]],
+        },
+        separate_voices: {
+          badge: active(voiceSplit),
+          waiting: number(voiceSplit.pending),
+          running: number(voiceSplit.running),
+          failed: number(voiceSplit.failed),
+          done: number(voiceSplit.completed),
+          metrics: [['Ongoing', active(voiceSplit)], ['Waiting', voiceSplit.pending], ['Running', voiceSplit.running], ['Failed', voiceSplit.failed]],
+        },
+        gate_voice: {
+          badge: active(voiceGate),
+          waiting: number(voiceGate.pending),
+          running: number(voiceGate.running),
+          failed: number(voiceGate.failed),
+          done: number(voiceGate.completed),
+          metrics: [['Ongoing', active(voiceGate)], ['Waiting', voiceGate.pending], ['Running', voiceGate.running], ['Failed', voiceGate.failed]],
+        },
+        gate_sfx: {
+          badge: active(sfxGate),
+          waiting: number(sfxGate.pending),
+          running: number(sfxGate.running),
+          failed: number(sfxGate.failed),
+          done: number(sfxGate.completed),
+          metrics: [['Ongoing', active(sfxGate)], ['Waiting', sfxGate.pending], ['Running', sfxGate.running], ['Failed', sfxGate.failed]],
+        },
+        transcribe_voice: {
+          badge: active(voiceTranscribe),
+          waiting: number(voiceTranscribe.pending),
+          running: number(voiceTranscribe.running),
+          failed: number(voiceTranscribe.failed),
+          done: number(voiceTranscribe.completed),
+          metrics: [['Ongoing', active(voiceTranscribe)], ['Waiting', voiceTranscribe.pending], ['Running', voiceTranscribe.running], ['Completed', voiceTranscribe.completed]],
+        },
+        list_sfx: {
+          badge: active(listSfx),
+          waiting: number(listSfx.pending),
+          running: number(listSfx.running),
+          failed: number(listSfx.failed),
+          done: number(listSfx.completed),
+          metrics: [['Ongoing', active(listSfx)], ['Waiting', listSfx.pending], ['Running', listSfx.running], ['Completed', listSfx.completed]],
         },
         separate_sfx: {
-          badge: samAudioActive,
-          waiting: number(samAudio.pending),
-          running: number(samAudio.running),
-          failed: number(samAudio.failed),
-          done: number(samAudio.completed),
-          metrics: [['Ongoing', samAudioActive], ['Waiting', samAudio.pending], ['Running', samAudio.running], ['Failed', samAudio.failed]],
+          badge: active(sfxSplit),
+          waiting: number(sfxSplit.pending),
+          running: number(sfxSplit.running),
+          failed: number(sfxSplit.failed),
+          done: number(sfxSplit.completed),
+          metrics: [['Ongoing', active(sfxSplit)], ['Waiting', sfxSplit.pending], ['Running', sfxSplit.running], ['Failed', sfxSplit.failed]],
         },
-        stems_db: {
-          badge: 0,
-          metrics: [['Ongoing writes', 0], ['Stem rows total', data.totals.stems], ['Recent outputs', data.recent_outputs.length]],
+        gate_remaining_sfx: {
+          badge: active(remainingSfxGate),
+          waiting: number(remainingSfxGate.pending),
+          running: number(remainingSfxGate.running),
+          failed: number(remainingSfxGate.failed),
+          done: number(remainingSfxGate.completed),
+          metrics: [['Ongoing', active(remainingSfxGate)], ['Waiting', remainingSfxGate.pending], ['Running', remainingSfxGate.running], ['Failed', remainingSfxGate.failed]],
         },
-        skipped_silent: {
+        artifacts_db: {
           badge: 0,
-          metrics: [['Ongoing skips', 0], ['Silent chunks total', data.stages.skipped_silent], ['All chunks', data.totals.chunks]],
+          metrics: [['Ongoing writes', 0], ['Artifacts total', data.totals.artifacts], ['Recent outputs', data.recent_outputs.length]],
+        },
+        music_ready: {
+          badge: 0,
+          metrics: [['Ongoing', 0], ['Ready chunks', data.stages.music_ready], ['Described chunks', data.stages.music_described], ['Skipped music', data.stages.skipped_music]],
+        },
+        sfx_voice_ready: {
+          badge: 0,
+          metrics: [['Ongoing', 0], ['Ready chunks', data.stages.sfx_voice_ready], ['Skipped sfx+voice', data.stages.skipped_sfx_voice]],
+        },
+        sfx_ready: {
+          badge: 0,
+          metrics: [
+            ['Ongoing', 0],
+            ['Ready chunks', data.stages.sfx_ready],
+            ['Loop exhausted', data.stages.sfx_exhausted],
+            ['Iteration limit', data.stages.sfx_iteration_limit],
+            ['Loop failed', data.stages.sfx_loop_failed],
+          ],
+        },
+        skipped: {
+          badge: 0,
+          metrics: [
+            ['Ongoing skips', 0],
+            ['Skipped total', number(data.stages.skipped_silent) + number(data.stages.skipped_music) + number(data.stages.skipped_sfx_voice) + number(data.stages.skipped_voice) + number(data.stages.skipped_sfx) + number(data.stages.sfx_exhausted)],
+            ['Chunk gate empty', data.stages.skipped_silent],
+            ['Music empty', data.stages.skipped_music],
+            ['SFX+voice empty', data.stages.skipped_sfx_voice],
+            ['Voice empty', data.stages.skipped_voice],
+            ['SFX empty', data.stages.skipped_sfx],
+            ['Loop exhausted', data.stages.sfx_exhausted],
+          ],
         },
         failed: {
           badge: number(data.tasks.failed),
@@ -1388,7 +3039,7 @@ DASHBOARD_HTML = """<!doctype html>
         setBadge(name, values.badge, variant);
         const meta = document.querySelector(`[data-node-meta="${name}"]`);
         if (meta) {
-          meta.textContent = `waiting ${values.waiting || 0} · running ${values.running || 0}`;
+          meta.textContent = `waiting ${values.waiting || 0} · running ${values.running || 0} · ${formatAudioPerMinute(performanceForNode(data, name))}`;
         }
       });
       document.querySelectorAll('.flow-node').forEach(node => {
@@ -1401,7 +3052,7 @@ DASHBOARD_HTML = """<!doctype html>
       const stats = flowStats(data);
       const node = FLOW_NODES[selectedNode] || FLOW_NODES.source;
       const values = stats[selectedNode] || stats.source;
-      const metrics = values.metrics || [];
+      const metrics = (values.metrics || []).concat(performanceMetrics(performanceForNode(data, selectedNode)));
       document.getElementById('node-inspector').innerHTML = `
         <div>
           <div class="inspector-title">${esc(node.title)}</div>
@@ -1414,20 +3065,34 @@ DASHBOARD_HTML = """<!doctype html>
 
     function renderTables(data) {
       document.getElementById('stages').innerHTML = rows(['Stage', 'Chunks'], Object.entries(data.stages), ([stage, count]) => [`<td><code>${esc(stage)}</code></td>`, `<td>${count}</td>`]);
-      document.getElementById('queues').innerHTML = rows(['Queue', 'Pending', 'Running', 'Failed', 'Completed'], Object.entries(data.queues), ([q, c]) => [`<td><code>${esc(q)}</code></td>`, `<td>${c.pending || 0}</td>`, `<td>${c.running || 0}</td>`, `<td>${c.failed || 0}</td>`, `<td>${c.completed || 0}</td>`]);
+      document.getElementById('queues').innerHTML = rows(['Queue', 'Pending', 'Running', 'Audio/min', 'Avg task', 'Failed', 'Completed'], Object.entries(data.queues), ([q, c]) => {
+        const metric = perfQueue(data, q);
+        return [`<td><code>${esc(q)}</code></td>`, `<td>${c.pending || 0}</td>`, `<td>${c.running || 0}</td>`, `<td>${esc(formatAudioPerMinute(metric))}</td>`, `<td>${esc(formatSeconds(metric.avg_task_seconds))}</td>`, `<td>${c.failed || 0}</td>`, `<td>${c.completed || 0}</td>`];
+      });
       document.getElementById('jobs').innerHTML = rows(['Job', 'Status', 'Chunks', 'Source', 'Updated'], data.recent_jobs, j => [`<td><code>${esc(j.id)}</code></td>`, `<td class="${statusClass(j.status)}">${esc(j.status)}</td>`, `<td>${j.complete_chunks || 0}/${j.chunk_count || 0}</td>`, `<td><code>${esc(j.source_audio_path)}</code></td>`, `<td>${esc(j.updated_at)}</td>`]);
       document.getElementById('failures').innerHTML = rows(['Task', 'Queue', 'Chunk', 'Error', 'Retry'], data.recent_failures, f => [`<td><code>${esc(f.id)}</code></td>`, `<td><code>${esc(f.queue)}</code></td>`, `<td>${esc(f.chunk_index)}</td>`, `<td>${esc(f.error)}</td>`, `<td><button class="secondary" onclick="retryTask('${esc(f.id)}')">Retry</button></td>`]);
-      document.getElementById('outputs').innerHTML = rows(['Chunk', 'Prompt', 'Target', 'Residual', 'Zip'], data.recent_outputs, o => [`<td>${esc(o.chunk_index)}</td>`, `<td>${esc(o.prompt)}</td>`, `<td>${link(o.target.wav || o.target.mp3)}</td>`, `<td>${link(o.residual.wav || o.residual.mp3)}</td>`, `<td>${link(o.zip)}</td>`]);
+      document.getElementById('outputs').innerHTML = rows(['Kind', 'Chunk', 'Prompt/Text', 'File', 'Created'], data.recent_outputs, o => [`<td><code>${esc(o.kind)}</code></td>`, `<td>${esc(o.chunk_index || '')}</td>`, `<td>${esc(o.text || o.prompt || '')}</td>`, `<td>${link(o.path_ref)}</td>`, `<td>${esc(o.created_at)}</td>`]);
     }
 
     function renderSummary(data) {
       const jobs = data.jobs || { queued: 0, running: 0, complete: 0, failed: 0 };
       const activeJobs = number(jobs.queued) + number(jobs.running);
-      const activeChunks = number(data.stages.sound_gate) + number(data.stages.describe_sfx) + number(data.stages.separate_sfx);
+      const terminalChunks =
+        number(data.stages.complete) + number(data.stages.skipped_silent) +
+        number(data.stages.music_ready) + number(data.stages.music_described) +
+        number(data.stages.sfx_voice_ready) + number(data.stages.voice_transcribed) +
+        number(data.stages.sfx_ready) + number(data.stages.sfx_exhausted) +
+        number(data.stages.sfx_iteration_limit) + number(data.stages.sfx_loop_failed) +
+        number(data.stages.skipped_music) +
+        number(data.stages.skipped_sfx_voice) + number(data.stages.skipped_voice) +
+        number(data.stages.skipped_sfx) +
+        number(data.stages.failed);
+      const activeChunks = Math.max(0, number(data.totals.chunks) - terminalChunks);
       const pills = [
         ['Total jobs', data.totals.jobs],
         ['Ongoing jobs', activeJobs],
         ['Ongoing chunks', activeChunks],
+        ['Throughput', formatAudioPerMinute(perfOverall(data))],
         ['Pending', data.tasks.pending],
         ['Running', data.tasks.running],
         ['Failed', data.tasks.failed],
@@ -1438,7 +3103,7 @@ DASHBOARD_HTML = """<!doctype html>
     async function refresh() {
       const data = await fetch('/api/dashboard').then(r => r.json());
       latestData = data;
-      document.getElementById('meta').textContent = `backend=${data.backend} db=${data.db_path}`;
+      document.getElementById('meta').textContent = `backend=${data.backend} storage=${data.storage_backend || 'local'} db=${data.db_path}`;
       renderSummary(data);
       renderGraph(data);
       renderTables(data);
@@ -1484,8 +3149,8 @@ DASHBOARD_HTML = """<!doctype html>
 """
 
 
-def create_app(config: PipelineConfig | None = None) -> FastAPI:
-    runtime = PipelineRuntime(config or PipelineConfig.from_env())
+def create_app(config: PipelineConfig | None = None, storage: ArtifactStorage | None = None) -> FastAPI:
+    runtime = PipelineRuntime(config or PipelineConfig.from_env(), storage=storage)
     runtime.config.output_dir.mkdir(parents=True, exist_ok=True)
 
     @asynccontextmanager
@@ -1507,13 +3172,14 @@ def create_app(config: PipelineConfig | None = None) -> FastAPI:
 
     @app.get("/healthz")
     def healthz() -> dict[str, Any]:
-        return {"status": "ok", "backend": runtime.config.backend}
+        return {"status": "ok", "backend": runtime.config.backend, "storage_backend": runtime.storage.backend}
 
     @app.get("/readyz")
     def readyz() -> dict[str, Any]:
         return {
             "ready": True,
             "backend": runtime.config.backend,
+            "storage_backend": runtime.storage.backend,
             "db_path": str(runtime.config.db_path),
             "worker_enabled": runtime.config.worker_enabled,
         }

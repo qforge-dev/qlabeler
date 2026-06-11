@@ -93,8 +93,10 @@ You can also run the equivalent root-level wrapper:
 Mock behavior:
 
 - sound gate runs local dBFS/peak/windowed active-audio analysis;
-- Audio Flamingo returns deterministic mock sources and `SAM_PROMPT: horse hooves`;
-- SAM-Audio copies the chunk into target/residual mock files.
+- Audio Flamingo returns deterministic whole-scene, music-description, and
+  diarized voice-transcription text plus strict JSON SFX candidates;
+- SAM-Audio copies the chunk into music/sfx+voice and voice/sfx target/residual
+  files, then copies SFX loop target/residual files until the iteration cap.
 
 Submit an audio file from the dashboard file picker, or with:
 
@@ -174,8 +176,16 @@ GET /
 
 Queue a source audio file. The dashboard uses file upload and stores the source
 under pipeline artifacts before splitting it into 30-second chunks with
-5-second overlap, running sound gate, asking Audio Flamingo for one SAM target
-prompt, then running SAM-Audio separation.
+5-second overlap. Each job also queues one full-file Audio Flamingo scene
+description. Audible chunks pass through the local sound gate, then SAM-Audio
+separates a fixed `music` target from an `sfx+voice` residual. Both resulting
+tracks run through the sound gate. Audible music is described by Audio
+Flamingo. Audible sfx+voice residuals are split with fixed prompt
+`human voice`, then the voice and sfx outputs are sound-gated; audible voice is
+transcribed with diarization. Audible sfx enters a recursive loop: Audio
+Flamingo lists sound-effect candidates as strict JSON, the first candidate is
+separated by SAM-Audio, the remaining residual is sound-gated, and the loop
+continues until the residual is empty or 8 iterations have run.
 
 ```bash
 curl -X POST http://127.0.0.1:8000/api/jobs/upload \
@@ -202,7 +212,47 @@ POST /api/tasks/{task_id}/retry
 ```
 
 The dashboard shows job totals, chunk stage counts, queue depths, recent
-failures, and recent target/residual outputs.
+failures, recent scene/music/voice/sfx loop artifacts, and throughput metrics.
+Throughput is shown as audio processed per wall-clock minute. For example,
+`30s/min` means the block processed thirty seconds of source audio in one
+minute of runtime; `2.0m/min` means two minutes of source audio per runtime
+minute. Queue-level metrics summarize whole runtimes such as SAM-Audio and
+Audio Flamingo, while graph-node metrics summarize each task purpose.
+
+## Artifact Storage
+
+The pipeline writes runtime files locally because the model APIs and sound gate
+still operate on local paths. Artifact publication goes through a storage
+adapter:
+
+```text
+PIPELINE_STORAGE_BACKEND=local
+```
+
+Local mode is the default for tests and `./dev`; artifact refs point at the
+local `/files/...` mount.
+
+For production, configure S3:
+
+```bash
+PIPELINE_STORAGE_BACKEND=s3
+S3_BUCKET=your-artifact-bucket
+S3_PREFIX=qlabeler
+AWS_REGION=us-east-1
+```
+
+Optional S3 settings:
+
+```text
+S3_ENDPOINT_URL=          # for S3-compatible storage
+S3_PUBLIC_BASE_URL=       # if objects are served through a public/CDN base URL
+S3_PRESIGN_SECONDS=0      # set >0 to return presigned object URLs
+```
+
+S3 mode uploads every file-backed artifact when it is inserted into the
+artifacts table. The row keeps the local `path` for pipeline processing and adds
+the S3 ref under artifact metadata as `storage`; API responses expose it as
+`storage_ref` and prefer it in `path_ref`.
 
 The sound gate is local in both mock and real backend modes. It drops digital
 silence and barely audible chunks before they reach Audio Flamingo or SAM-Audio.
