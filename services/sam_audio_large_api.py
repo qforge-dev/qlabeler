@@ -397,10 +397,8 @@ def run_separation(
         )
 
     # Read source audio metadata for post-processing (sample rate, channels, waveform).
-    source_info = torchaudio.info(str(audio_path))
-    source_sample_rate = source_info.sample_rate
-    source_channels = source_info.num_channels
-    source_waveform, _ = torchaudio.load(str(audio_path))
+    source_waveform, source_sample_rate = torchaudio.load(str(audio_path))
+    source_channels = source_waveform.shape[0]
 
     processor_kwargs: dict[str, Any] = {
         "audios": [str(audio_path)],
@@ -471,8 +469,7 @@ def run_separation_batch(
                     "Split longer audio before sending it to SAM-Audio."
                 )
             # Read source audio metadata.
-            source_info = torchaudio.info(str(audio_path))
-            source_wav, _ = torchaudio.load(str(audio_path))
+            source_wav, src_sr = torchaudio.load(str(audio_path))
             valid.append(
                 {
                     "index": index,
@@ -481,8 +478,8 @@ def run_separation_batch(
                     "anchors": item.anchors,
                     "duration_seconds": duration_seconds,
                     "output_prefix": safe_prefix(item.output_prefix),
-                    "source_sample_rate": source_info.sample_rate,
-                    "source_channels": source_info.num_channels,
+                    "source_sample_rate": src_sr,
+                    "source_channels": source_wav.shape[0],
                     "source_waveform": source_wav,
                 }
             )
