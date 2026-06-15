@@ -228,15 +228,12 @@ def match_source_format(
     source_channels: int,
     source_waveform: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, int]:
-    """Apply separation as a soft mask on the original stereo/multichannel audio.
+    """Apply separation using a STFT soft mask on the original audio.
 
-    Instead of just duplicating mono to stereo, we compute a time-domain mask
-    from the model's mono separation and apply it to each channel of the original
-    signal independently.  This preserves the stereo image (panning, spatial cues).
-
-    Mask = |target| / (|target| + |residual| + eps)
-    target_out = original * mask
-    residual_out = original * (1 - mask)
+    Computes the Wiener-like mask in the frequency domain from the model's mono
+    outputs, then applies it to the STFT of each channel of the original signal.
+    This produces much cleaner separation with less spillover than time-domain
+    masking, and preserves the stereo image.
     """
     if target.ndim == 1:
         target = target.unsqueeze(0)
@@ -251,18 +248,10 @@ def match_source_format(
     # Ensure source waveform is float32 for arithmetic.
     source = source_waveform.to(torch.float32)
 
-    # If source is mono or model output matches channels, just return resampled + volume-matched.
-    if source_channels == 1:
-        # Scale to match source RMS.
-        source_rms = source.pow(2).mean().sqrt().item()
-        for wav in (target, residual):
-            out_rms = wav.pow(2).mean().sqrt().item()
-            if out_rms > 1e-8 and source_rms > 0:
-                wav.mul_(source_rms / out_rms)
-        return target, residual, source_sample_rate
+    # If source is mono, apply STFT mask on the single channel.
+    # If stereo/multi, apply STFT mask per channel using the mono model output as guide.
 
-    # --- Stereo/multichannel mask-based separation ---
-    # Trim or pad to match lengths (resampling can cause off-by-one).
+    # Trim or pad model outputs to match source length.
     n_samples = source.shape[-1]
     if target.shape[-1] > n_samples:
         target = target[..., :n_samples]
@@ -272,15 +261,36 @@ def match_source_format(
         target = torch.nn.functional.pad(target, (0, pad))
         residual = torch.nn.functional.pad(residual, (0, pad))
 
-    # Compute soft mask from magnitudes (mono).
-    eps = 1e-8
-    target_abs = target.abs()
-    residual_abs = residual.abs()
-    mask = target_abs / (target_abs + residual_abs + eps)  # shape: (1, samples)
+    # STFT parameters.
+    n_fft = 2048
+    hop_length = 512
+    window = torch.hann_window(n_fft)
 
-    # Apply mask to each channel of the source.
-    target_out = source * mask
-    residual_out = source * (1.0 - mask)
+    # Compute STFT of model outputs (mono) for the mask.
+    target_mono = target.mean(dim=0)  # (samples,)
+    residual_mono = residual.mean(dim=0)  # (samples,)
+
+    target_stft = torch.stft(target_mono, n_fft=n_fft, hop_length=hop_length, window=window, return_complex=True)
+    residual_stft = torch.stft(residual_mono, n_fft=n_fft, hop_length=hop_length, window=window, return_complex=True)
+
+    # Wiener-like soft mask in frequency domain: |target|^2 / (|target|^2 + |residual|^2 + eps)
+    eps = 1e-10
+    target_power = target_stft.abs().pow(2)
+    residual_power = residual_stft.abs().pow(2)
+    mask = target_power / (target_power + residual_power + eps)  # shape: (freq_bins, time_frames)
+
+    # Apply mask to each channel of the source independently.
+    target_channels = []
+    residual_channels = []
+    for ch in range(source.shape[0]):
+        source_stft = torch.stft(source[ch], n_fft=n_fft, hop_length=hop_length, window=window, return_complex=True)
+        target_ch = torch.istft(source_stft * mask, n_fft=n_fft, hop_length=hop_length, window=window, length=n_samples)
+        residual_ch = torch.istft(source_stft * (1.0 - mask), n_fft=n_fft, hop_length=hop_length, window=window, length=n_samples)
+        target_channels.append(target_ch)
+        residual_channels.append(residual_ch)
+
+    target_out = torch.stack(target_channels, dim=0)
+    residual_out = torch.stack(residual_channels, dim=0)
 
     return target_out, residual_out, source_sample_rate
 
