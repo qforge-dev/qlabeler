@@ -7,6 +7,15 @@ dashboard and production-style FastAPI wrappers for two audio models:
 - `facebook/sam-audio-large` for separating one described sound from a short
   audio clip.
 
+## Technical Documentation
+
+- [Stereo Transfer](docs/STEREO_TRANSFER.md) — How separated mono audio is reconstructed to stereo
+- [SAM-Audio Integration](docs/SAM_AUDIO_INTEGRATION.md) — Model configuration, fp32 requirement, and lessons
+- [Pipeline Architecture](docs/PIPELINE_ARCHITECTURE.md) — Processing flow, sound gates, and design decisions
+- [Agent Knowledge](AGENTS.md) — Lessons learned for AI-assisted development
+
+## Services
+
 The RunPod setup starts three services:
 
 - Pipeline dashboard/API on port `8000`.
