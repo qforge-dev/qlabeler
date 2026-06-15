@@ -3143,6 +3143,7 @@ DASHBOARD_HTML = """<!doctype html>
     .daw-track-info { min-width: 0; }
     .daw-track-title { font-weight: 700; font-size: 12px; color: #e0e0e0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .daw-track-kind { font-size: 11px; color: #888; }
+    .daw-track-prompt { font-size: 11px; color: #aad; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 130px; cursor: help; }
     .daw-download-btn { display: flex; align-items: center; justify-content: center; width: 28px; height: 28px; margin-left: auto; background: #2a3a4a; color: #8cf; border-radius: 4px; text-decoration: none; font-size: 14px; border: 1px solid #3a5a6a; }
     .daw-download-btn:hover { background: #3a4a5a; }
     .daw-track-waveform { position: relative; padding: 4px 0; cursor: pointer; }
@@ -3882,8 +3883,9 @@ DASHBOARD_HTML = """<!doctype html>
                     ${isSource ? '&#128264;' : '&#128263;'}
                   </button>
                   <div class="daw-track-info">
-                    <div class="daw-track-title">${esc(lane.label)}</div>
+                    <div class="daw-track-title" title="${esc((lane.metadata || {}).prompt || '')}">${esc(lane.label)}</div>
                     <div class="daw-track-kind"><code>${esc(lane.kind)}</code></div>
+                    ${(lane.metadata || {}).prompt ? `<div class="daw-track-prompt" title="${esc(lane.metadata.prompt)}">${esc(lane.metadata.prompt)}</div>` : ''}
                   </div>
                   ${href ? `<a class="daw-download-btn" href="${esc(href)}" download title="Download">&#11015;</a>` : ''}
                 </div>
