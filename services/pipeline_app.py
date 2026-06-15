@@ -360,6 +360,7 @@ class PipelineRuntime:
                     chunk_count INTEGER NOT NULL DEFAULT 0,
                     has_music INTEGER DEFAULT NULL,
                     has_voices INTEGER DEFAULT NULL,
+                    music_description TEXT DEFAULT NULL,
                     error TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
@@ -870,6 +871,11 @@ class PipelineRuntime:
                 has_voices = job_row["has_voices"] if job_row and job_row["has_voices"] is not None else 1
 
                 if has_music:
+                    # Use the detailed music description from scene analysis as the SAM prompt.
+                    job_row2 = conn.execute(
+                        "SELECT music_description FROM jobs WHERE id = ?", (task["job_id"],)
+                    ).fetchone()
+                    music_prompt = (job_row2["music_description"] if job_row2 and job_row2["music_description"] else None) or "music"
                     # Normal flow: separate music first.
                     conn.execute(
                         "UPDATE chunks SET stage = ?, error = NULL, updated_at = ? WHERE id = ?",
@@ -883,7 +889,7 @@ class PipelineRuntime:
                         payload={
                             "purpose": PURPOSE_SEPARATE_MUSIC,
                             "audio_path": str(audio_path),
-                            "prompt": "music",
+                            "prompt": music_prompt,
                         },
                         created_at=timestamp,
                     )
@@ -1441,9 +1447,12 @@ class PipelineRuntime:
 
     def complete_scene_description(self, task: dict[str, Any], text: str, response: dict[str, Any]) -> None:
         timestamp = now_iso()
-        # Parse has_music / has_voices from the structured response.
+        # Parse has_music / has_voices / music_description from the structured response.
         has_music = self._parse_scene_bool(text, "HAS_MUSIC")
         has_voices = self._parse_scene_bool(text, "HAS_VOICES")
+        music_description = self._parse_scene_field(text, "MUSIC_DESCRIPTION")
+        if music_description and music_description.lower() in ("none", "n/a", ""):
+            music_description = None
         with self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             self._insert_artifact(
@@ -1454,18 +1463,18 @@ class PipelineRuntime:
                 kind=ARTIFACT_SCENE_DESCRIPTION,
                 text=text,
                 prompt=(json_loads(task["payload_json"], {}) or {}).get("prompt"),
-                metadata={**response, "has_music": has_music, "has_voices": has_voices},
+                metadata={**response, "has_music": has_music, "has_voices": has_voices, "music_description": music_description},
                 created_at=timestamp,
             )
-            # Store has_music/has_voices on the job for downstream decisions.
+            # Store has_music/has_voices/music_description on the job for downstream decisions.
             conn.execute(
-                "UPDATE jobs SET has_music = ?, has_voices = ?, updated_at = ? WHERE id = ?",
-                (int(has_music), int(has_voices), timestamp, task["job_id"]),
+                "UPDATE jobs SET has_music = ?, has_voices = ?, music_description = ?, updated_at = ? WHERE id = ?",
+                (int(has_music), int(has_voices), music_description, timestamp, task["job_id"]),
             )
             self._complete_task_conn(
                 conn,
                 task["id"],
-                {"text": text, "backend": self.config.backend, "has_music": has_music, "has_voices": has_voices},
+                {"text": text, "backend": self.config.backend, "has_music": has_music, "has_voices": has_voices, "music_description": music_description},
                 timestamp,
             )
             self._insert_event(
@@ -1474,12 +1483,23 @@ class PipelineRuntime:
                 chunk_id=None,
                 task_id=task["id"],
                 level="info",
-                message=f"Scene described: has_music={has_music}, has_voices={has_voices}",
-                data={"text": text, "has_music": has_music, "has_voices": has_voices},
+                message=f"Scene described: has_music={has_music}, has_voices={has_voices}, music='{music_description or ''}'",
+                data={"text": text, "has_music": has_music, "has_voices": has_voices, "music_description": music_description},
                 created_at=timestamp,
             )
             self._update_job_status_conn(conn, task["job_id"], timestamp)
             conn.execute("COMMIT")
+
+    @staticmethod
+    def _parse_scene_field(text: str, key: str) -> str | None:
+        """Parse a field like 'MUSIC_DESCRIPTION: some text here' from the scene description."""
+        import re
+        pattern = rf"(?i){re.escape(key)}\s*:\s*(.+)"
+        match = re.search(pattern, text)
+        if match:
+            value = match.group(1).strip()
+            return value if value else None
+        return None
 
     @staticmethod
     def _parse_scene_bool(text: str, key: str) -> bool:
@@ -2299,7 +2319,10 @@ class PipelineRuntime:
             "Listen to the whole audio and answer in exactly this format:\n"
             "HAS_MUSIC: true or false\n"
             "HAS_VOICES: true or false\n"
-            "DESCRIPTION: <one sentence describing the audio scene>\n"
+            "MUSIC_DESCRIPTION: <if HAS_MUSIC is true, describe the music in a short phrase: "
+            "genre, instruments, tempo, mood. Example: 'upbeat electronic dance music with synth pads and four-on-the-floor drums'. "
+            "If no music, write 'none'>\n"
+            "DESCRIPTION: <one sentence describing the full audio scene>\n"
             "Reply with nothing else."
         )
 
