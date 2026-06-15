@@ -233,11 +233,11 @@ class PipelineConfig:
     chunk_ms: int = 30_000
     overlap_ms: int = 5_000
     min_chunk_ms: int = 10_000
-    sound_gate_min_dbfs: float = -50.0
-    sound_gate_min_peak_dbfs: float = -55.0
+    sound_gate_min_dbfs: float = -40.0
+    sound_gate_min_peak_dbfs: float = -35.0
     sound_gate_window_ms: int = 100
-    sound_gate_min_active_ms: int = 250
-    sound_gate_min_active_ratio: float = 0.01
+    sound_gate_min_active_ms: int = 1000
+    sound_gate_min_active_ratio: float = 0.05
     request_timeout_seconds: float = 600.0
     storage_backend: str = "local"
     s3_bucket: str | None = None
@@ -1003,8 +1003,44 @@ class PipelineRuntime:
                     stage = STAGE_DESCRIBE_MUSIC
                     message = "Music track gate passed"
                 else:
-                    stage = STAGE_GATE_SFX_VOICE if self._has_incomplete_purpose_conn(conn, task["chunk_id"], PURPOSE_GATE_SFX_VOICE) else STAGE_SKIPPED_MUSIC
-                    message = "Music track gate skipped silent output"
+                    # Music target is empty — separation produced nothing useful.
+                    # Use the original chunk audio for subsequent stages instead of the residual.
+                    chunk_row = conn.execute(
+                        "SELECT audio_path FROM chunks WHERE id = ?", (task["chunk_id"],)
+                    ).fetchone()
+                    original_audio = chunk_row["audio_path"] if chunk_row else audio_path
+                    job_row = conn.execute(
+                        "SELECT has_voices FROM jobs WHERE id = ?", (task["job_id"],)
+                    ).fetchone()
+                    has_voices = job_row["has_voices"] if job_row and job_row["has_voices"] is not None else 1
+                    if has_voices:
+                        self._insert_task(
+                            conn,
+                            job_id=task["job_id"],
+                            chunk_id=task["chunk_id"],
+                            queue=TASK_SAM_AUDIO,
+                            payload={
+                                "purpose": PURPOSE_SEPARATE_VOICES,
+                                "audio_path": original_audio,
+                                "prompt": "human voice",
+                            },
+                            created_at=timestamp,
+                        )
+                        stage = STAGE_SEPARATE_VOICES
+                    else:
+                        self._insert_task(
+                            conn,
+                            job_id=task["job_id"],
+                            chunk_id=task["chunk_id"],
+                            queue=TASK_AUDIO_FLAMINGO,
+                            payload={
+                                "purpose": PURPOSE_LIST_SFX,
+                                "audio_path": original_audio,
+                            },
+                            created_at=timestamp,
+                        )
+                        stage = STAGE_LIST_SFX
+                    message = "Music track gate skipped (empty) — using original audio for next stage"
             elif track_type == "sfx_voice":
                 if result["has_sound"]:
                     # Check job-level has_voices before separating voice.
@@ -1062,8 +1098,27 @@ class PipelineRuntime:
                     )
                     stage = STAGE_TRANSCRIBE_VOICE
                 else:
-                    stage = STAGE_SKIPPED_VOICE
-                message = "Voice track gate passed" if result["has_sound"] else "Voice track gate skipped silent output"
+                    # Voice target is empty — use the input audio (sfx_voice or original) for SFX.
+                    # Get the audio that was fed into voice separation (the parent track).
+                    parent_audio = payload.get("source_audio_path")
+                    if not parent_audio:
+                        chunk_row = conn.execute(
+                            "SELECT audio_path FROM chunks WHERE id = ?", (task["chunk_id"],)
+                        ).fetchone()
+                        parent_audio = chunk_row["audio_path"] if chunk_row else audio_path
+                    self._insert_task(
+                        conn,
+                        job_id=task["job_id"],
+                        chunk_id=task["chunk_id"],
+                        queue=TASK_AUDIO_FLAMINGO,
+                        payload={
+                            "purpose": PURPOSE_LIST_SFX,
+                            "audio_path": parent_audio,
+                        },
+                        created_at=timestamp,
+                    )
+                    stage = STAGE_LIST_SFX
+                message = "Voice track gate passed" if result["has_sound"] else "Voice track gate skipped (empty) — using parent audio for SFX"
             elif track_type == "sfx":
                 if result["has_sound"]:
                     self._insert_task(
@@ -1910,6 +1965,7 @@ class PipelineRuntime:
                     "track_type": "voice",
                     "audio_path": voice_path,
                     "artifact_id": voice_artifact_id,
+                    "source_audio_path": payload.get("audio_path"),
                 },
                 created_at=timestamp,
             )
@@ -2408,7 +2464,7 @@ class PipelineRuntime:
         has_enough_level = overall_dbfs >= self.config.sound_gate_min_dbfs or loudest_window_dbfs >= self.config.sound_gate_min_dbfs
         has_enough_active_audio = (
             active_ms >= self.config.sound_gate_min_active_ms
-            or active_ratio >= self.config.sound_gate_min_active_ratio
+            and active_ratio >= self.config.sound_gate_min_active_ratio
         )
         has_sound = duration_ms > 0 and has_peak and has_enough_level and has_enough_active_audio
 
@@ -3087,6 +3143,8 @@ DASHBOARD_HTML = """<!doctype html>
     .daw-track-info { min-width: 0; }
     .daw-track-title { font-weight: 700; font-size: 12px; color: #e0e0e0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .daw-track-kind { font-size: 11px; color: #888; }
+    .daw-download-btn { display: flex; align-items: center; justify-content: center; width: 28px; height: 28px; margin-left: auto; background: #2a3a4a; color: #8cf; border-radius: 4px; text-decoration: none; font-size: 14px; border: 1px solid #3a5a6a; }
+    .daw-download-btn:hover { background: #3a4a5a; }
     .daw-track-waveform { position: relative; padding: 4px 0; cursor: pointer; }
     .daw-track-waveform .waveform-canvas { width: 100%; height: 48px; display: block; border: none; border-radius: 0; background: transparent; }
     .daw-playhead { position: absolute; top: 0; bottom: 0; width: 2px; background: #ff4444; left: 0; pointer-events: none; transition: left 0.05s linear; }
@@ -3827,6 +3885,7 @@ DASHBOARD_HTML = """<!doctype html>
                     <div class="daw-track-title">${esc(lane.label)}</div>
                     <div class="daw-track-kind"><code>${esc(lane.kind)}</code></div>
                   </div>
+                  ${href ? `<a class="daw-download-btn" href="${esc(href)}" download title="Download">&#11015;</a>` : ''}
                 </div>
                 <div class="daw-track-waveform">
                   <canvas class="waveform-canvas" data-lane-index="${index}" width="900" height="48"></canvas>
