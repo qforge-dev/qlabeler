@@ -257,6 +257,10 @@ install_sam_audio_env() {
   log "Installing SAM-Audio Large environment"
   create_venv "$SAM_AUDIO_VENV"
   install_torch "$SAM_AUDIO_VENV"
+  # xformers needs torch at build time; install with --no-build-isolation
+  # so it finds the already-installed torch in the venv.
+  "$SAM_AUDIO_VENV/bin/python" -m pip install --upgrade --no-build-isolation \
+    "xformers>=0.0.28" || true
   "$SAM_AUDIO_VENV/bin/python" -m pip uninstall -y \
     tensorflow tensorflow-cpu tensorflow-text tensorflow-datasets \
     tensorflow-metadata tf-keras keras jax jaxlib || true
