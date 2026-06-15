@@ -59,6 +59,7 @@ class SeparateRequest(BaseModel):
     file_path: str | None = Field(default=None, description="Alias for audio_path.")
     file: str | None = Field(default=None, description="Alias for audio_path.")
     audio_url: str | None = Field(default=None, description="Alias for audio_path; only file:// URLs are supported.")
+    source_audio_path: str | None = Field(default=None, description="Original stereo source for panning transfer. If not set, uses audio_path.")
     prompt: str | None = Field(default=None, description="Target sound description.")
     input: str | None = Field(default=None, description="Alias for prompt.")
     description: str | None = Field(default=None, description="Alias for prompt.")
@@ -223,117 +224,107 @@ def result_component(value: Any, index: int) -> torch.Tensor:
     return value
 
 
-def apply_stereo_panning(
-    target_mono: torch.Tensor,
-    residual_mono: torch.Tensor,
+def apply_stereo_transfer(
+    separated_mono: torch.Tensor,
     model_sample_rate: int,
     source_path: Path,
-) -> tuple[torch.Tensor, torch.Tensor, int]:
-    """Transfer stereo panning and volume from the original mix onto the mono separated signals.
+) -> tuple[torch.Tensor, int]:
+    """Transfer stereo panning and volume from the original stereo mix onto a mono separated signal.
 
-    Instead of masking the original (which destroys phase coherence and causes mushiness),
-    we BUILD the stereo output from the clean mono separation and borrow only the spatial
-    characteristics (panning + volume) from the original.
+    Uses voice-weighted dominant-bin panning from the original, smoothed with bidirectional EMA.
+    Volume is peak-matched to the original.
+    Phase is kept from the separated signal (no artifacts).
 
-    For each time-frequency bin:
-      - Panning: L/R balance from the original mix
-      - Volume: scaled so total energy matches the source fraction of the original
-      - Phase: kept from the separated signal (coherent, no artifacts)
+    Returns (stereo_output, source_sample_rate). If source is mono, returns the
+    volume-matched mono signal at source sample rate.
     """
     source_waveform, source_sr = torchaudio.load(str(source_path))
     source = source_waveform.to(torch.float32)
     n_channels = source.shape[0]
 
-    # If source is mono, just resample and volume-match.
-    if n_channels == 1:
-        if model_sample_rate != source_sr:
-            target_mono = torchaudio.functional.resample(target_mono, model_sample_rate, source_sr)
-            residual_mono = torchaudio.functional.resample(residual_mono, model_sample_rate, source_sr)
-        # Volume match: scale to match source RMS
-        src_rms = source.pow(2).mean().sqrt().item()
-        for wav in (target_mono, residual_mono):
-            w_rms = wav.pow(2).mean().sqrt().item()
-            if w_rms > 1e-8 and src_rms > 0:
-                wav.mul_(src_rms / w_rms)
-        return target_mono, residual_mono, source_sr
+    # Ensure separated is 1D mono
+    sep_mono = separated_mono.detach().to(torch.float32).cpu()
+    if sep_mono.ndim > 1:
+        sep_mono = sep_mono.squeeze(0)
 
-    # Resample model outputs to source sample rate.
+    # Resample to source sample rate if needed
     if model_sample_rate != source_sr:
-        target_mono = torchaudio.functional.resample(target_mono, model_sample_rate, source_sr)
-        residual_mono = torchaudio.functional.resample(residual_mono, model_sample_rate, source_sr)
+        sep_mono = torchaudio.functional.resample(sep_mono, model_sample_rate, source_sr)
 
-    # Ensure 1D mono
-    t_mono = target_mono.squeeze(0) if target_mono.ndim > 1 else target_mono
-    r_mono = residual_mono.squeeze(0) if residual_mono.ndim > 1 else residual_mono
+    # If source is mono, just peak-match volume and return
+    if n_channels == 1:
+        og_peak = source.abs().max().item()
+        sep_peak = sep_mono.abs().max().item()
+        if sep_peak > 1e-8 and og_peak > 0:
+            sep_mono = sep_mono * (og_peak / sep_peak)
+        return sep_mono.unsqueeze(0), source_sr
 
-    # Trim/pad to match source length
+    # Pad/trim to match source length
     n_samples = source.shape[-1]
-    if t_mono.shape[-1] > n_samples:
-        t_mono = t_mono[:n_samples]
-        r_mono = r_mono[:n_samples]
-    elif t_mono.shape[-1] < n_samples:
-        pad = n_samples - t_mono.shape[-1]
-        t_mono = torch.nn.functional.pad(t_mono, (0, pad))
-        r_mono = torch.nn.functional.pad(r_mono, (0, pad))
+    if sep_mono.shape[-1] > n_samples:
+        sep_mono = sep_mono[:n_samples]
+    elif sep_mono.shape[-1] < n_samples:
+        sep_mono = torch.nn.functional.pad(sep_mono, (0, n_samples - sep_mono.shape[-1]))
 
-    # STFT parameters
-    n_fft = 2048
-    hop_length = 512
+    # STFT
+    n_fft = 4096
+    hop = 1024
     window = torch.hann_window(n_fft)
 
-    # Compute STFTs
-    orig_L = torch.stft(source[0], n_fft=n_fft, hop_length=hop_length, window=window, return_complex=True)
-    orig_R = torch.stft(source[1], n_fft=n_fft, hop_length=hop_length, window=window, return_complex=True)
-    target_stft = torch.stft(t_mono, n_fft=n_fft, hop_length=hop_length, window=window, return_complex=True)
-    residual_stft = torch.stft(r_mono, n_fft=n_fft, hop_length=hop_length, window=window, return_complex=True)
+    orig_L = torch.stft(source[0], n_fft=n_fft, hop_length=hop, window=window, return_complex=True)
+    orig_R = torch.stft(source[1], n_fft=n_fft, hop_length=hop, window=window, return_complex=True)
+    sep_stft = torch.stft(sep_mono, n_fft=n_fft, hop_length=hop, window=window, return_complex=True)
 
     eps = 1e-10
-
-    # Per-bin panning from original mix
+    sep_energy = sep_stft.abs().pow(2)
     orig_L_mag = orig_L.abs()
     orig_R_mag = orig_R.abs()
-    pan_L = orig_L_mag / (orig_L_mag + orig_R_mag + eps)
-    pan_R = 1.0 - pan_L
 
-    # Per-bin volume transfer: scale the separated signal to match the original's energy
-    # proportional to how much of the original this source represents.
-    orig_energy = orig_L_mag.pow(2) + orig_R_mag.pow(2)  # total stereo energy
-    target_mag = target_stft.abs()
-    residual_mag = residual_stft.abs()
-    source_fraction = target_mag.pow(2) / (target_mag.pow(2) + residual_mag.pow(2) + eps)
+    # Dominant-bin weighted panning: only use bins where separated signal is strong
+    frame_max = sep_energy.max(dim=0, keepdim=True).values
+    dominant_mask = (sep_energy > 0.01 * frame_max).float()
+    masked_energy = sep_energy * dominant_mask
 
-    # Target energy should be this fraction of the original
-    target_energy = source_fraction * orig_energy
-    # Gain to apply (per bin) — scales mono separated magnitude to match correct energy level
-    mono_energy = target_mag.pow(2) + eps
-    gain_target = (target_energy / mono_energy).sqrt().clamp(max=10.0)  # clamp to avoid explosion
+    raw_pan_L = orig_L_mag / (orig_L_mag + orig_R_mag + eps)
+    weighted_pan_L = (raw_pan_L * masked_energy).sum(dim=0) / (masked_energy.sum(dim=0) + eps)
 
-    # Same for residual
-    residual_fraction = 1.0 - source_fraction
-    residual_energy = residual_fraction * orig_energy
-    residual_mono_energy = residual_mag.pow(2) + eps
-    gain_residual = (residual_energy / residual_mono_energy).sqrt().clamp(max=10.0)
+    # Bidirectional EMA smoothing (preserves peaks, no boundary artifacts)
+    alpha = 0.03
+    n_frames = weighted_pan_L.shape[0]
 
-    # Build stereo outputs: separated_signal * gain * pan (keeps separated phase intact)
-    target_out_L = target_stft * gain_target * pan_L
-    target_out_R = target_stft * gain_target * pan_R
-    residual_out_L = residual_stft * gain_residual * pan_L
-    residual_out_R = residual_stft * gain_residual * pan_R
+    # Forward pass
+    ema_fwd = torch.zeros(n_frames)
+    ema_fwd[0] = weighted_pan_L[0]
+    for i in range(1, n_frames):
+        ema_fwd[i] = alpha * weighted_pan_L[i] + (1 - alpha) * ema_fwd[i - 1]
 
-    # ISTFT back to time domain
-    target_L = torch.istft(target_out_L, n_fft=n_fft, hop_length=hop_length, window=window, length=n_samples)
-    target_R = torch.istft(target_out_R, n_fft=n_fft, hop_length=hop_length, window=window, length=n_samples)
-    residual_L = torch.istft(residual_out_L, n_fft=n_fft, hop_length=hop_length, window=window, length=n_samples)
-    residual_R = torch.istft(residual_out_R, n_fft=n_fft, hop_length=hop_length, window=window, length=n_samples)
+    # Backward pass
+    ema_bwd = torch.zeros(n_frames)
+    ema_bwd[-1] = weighted_pan_L[-1]
+    for i in range(n_frames - 2, -1, -1):
+        ema_bwd[i] = alpha * weighted_pan_L[i] + (1 - alpha) * ema_bwd[i + 1]
 
-    target_stereo = torch.stack([target_L, target_R], dim=0)
-    residual_stereo = torch.stack([residual_L, residual_R], dim=0)
+    # Average = bidirectional (no lag, preserves extremes)
+    pan_L_smooth = (ema_fwd + ema_bwd) / 2.0
+    pan_R_smooth = 1.0 - pan_L_smooth
 
-    # Safety: clamp to avoid clipping
-    target_stereo = target_stereo.clamp(-1.0, 1.0)
-    residual_stereo = residual_stereo.clamp(-1.0, 1.0)
+    # Global gain: peak-match separated to original
+    og_peak = source.abs().max().item()
+    sep_peak = sep_mono.abs().max().item()
+    global_gain = og_peak / (sep_peak + eps) if sep_peak > 1e-8 else 1.0
 
-    return target_stereo, residual_stereo, source_sr
+    # Apply panning + gain in STFT domain (keeps separated signal's phase)
+    pan_L_expanded = pan_L_smooth.unsqueeze(0)  # (1, time)
+    pan_R_expanded = pan_R_smooth.unsqueeze(0)
+
+    out_L_stft = sep_stft * global_gain * pan_L_expanded
+    out_R_stft = sep_stft * global_gain * pan_R_expanded
+
+    out_L = torch.istft(out_L_stft, n_fft=n_fft, hop_length=hop, window=window, length=n_samples)
+    out_R = torch.istft(out_R_stft, n_fft=n_fft, hop_length=hop, window=window, length=n_samples)
+
+    result = torch.stack([out_L, out_R], dim=0).clamp(-1.0, 1.0)
+    return result, source_sr
 
 
 def save_waveform(path: Path, waveform: torch.Tensor, sample_rate: int) -> None:
@@ -375,6 +366,7 @@ def build_separation_response(
     output_prefix: str,
     peak_allocated: float | None,
     peak_reserved: float | None,
+    source_audio_path: Path | None = None,
     **_kwargs: Any,
 ) -> SeparateResponse:
     request_id = uuid.uuid4().hex
@@ -388,18 +380,26 @@ def build_separation_response(
     if residual.ndim == 1:
         residual = residual.unsqueeze(0)
 
-    # Apply stereo panning + volume transfer from original onto the clean mono separation.
-    out_sr = sample_rate
+    # Apply stereo transfer ONLY to target (extracted).
+    # Residual stays mono — it's used for further separation down the pipeline.
+    # Use the original source audio (og) for panning reference, not the immediate input.
+    stereo_source = source_audio_path or audio_path
+    target_sr = sample_rate
     try:
-        target, residual, out_sr = apply_stereo_panning(
-            target_mono=target,
-            residual_mono=residual,
+        target, target_sr = apply_stereo_transfer(
+            separated_mono=target,
             model_sample_rate=sample_rate,
-            source_path=audio_path,
+            source_path=stereo_source,
         )
     except Exception:
         # If stereo transfer fails, fall back to raw mono output.
         pass
+
+    # Residual: just resample to source sample rate if needed, keep mono
+    residual_sr = sample_rate
+    if target_sr != sample_rate:
+        residual = torchaudio.functional.resample(residual, sample_rate, target_sr)
+        residual_sr = target_sr
 
     target_wav = job_dir / f"{output_prefix}_target.wav"
     residual_wav = job_dir / f"{output_prefix}_residual.wav"
@@ -407,8 +407,8 @@ def build_separation_response(
     residual_mp3 = job_dir / f"{output_prefix}_residual.mp3"
     zip_path = job_dir / f"{output_prefix}_outputs.zip"
 
-    save_waveform(target_wav, target, out_sr)
-    save_waveform(residual_wav, residual, out_sr)
+    save_waveform(target_wav, target, target_sr)
+    save_waveform(residual_wav, residual, residual_sr)
     wav_to_mp3(target_wav, target_mp3)
     wav_to_mp3(residual_wav, residual_mp3)
     zip_outputs([target_wav, residual_wav, target_mp3, residual_mp3], zip_path)
@@ -419,7 +419,7 @@ def build_separation_response(
         audio_path=str(audio_path),
         description=description,
         duration_seconds=float(duration_seconds),
-        sample_rate=out_sr,
+        sample_rate=target_sr,
         target={"wav": public_file_ref(target_wav), "mp3": public_file_ref(target_mp3)},
         residual={"wav": public_file_ref(residual_wav), "mp3": public_file_ref(residual_mp3)},
         raw_target=None,
@@ -441,6 +441,7 @@ def run_separation(
     max_audio_seconds: float,
     output_dir: Path,
     output_prefix: str,
+    source_audio_path: Path | None = None,
 ) -> SeparateResponse:
     state = load_model()
     assert state.model is not None
@@ -491,6 +492,7 @@ def run_separation(
         output_prefix=output_prefix,
         peak_allocated=peak_allocated,
         peak_reserved=peak_reserved,
+        source_audio_path=source_audio_path,
     )
 
 
@@ -632,6 +634,7 @@ def separate(request: SeparateRequest) -> SeparateResponse:
         audio_path = resolve_local_path(request.audio_ref())
         description = request.description_text()
         output_dir = resolve_output_dir(request.output_dir, default_subdir="sam-audio-large")
+        source_audio = resolve_local_path(request.source_audio_path) if request.source_audio_path else None
     except (FileNotFoundError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -645,6 +648,7 @@ def separate(request: SeparateRequest) -> SeparateResponse:
             max_audio_seconds=request.max_audio_seconds,
             output_dir=output_dir,
             output_prefix=safe_prefix(request.output_prefix),
+            source_audio_path=source_audio,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
