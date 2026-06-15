@@ -223,6 +223,71 @@ def result_component(value: Any, index: int) -> torch.Tensor:
     return value
 
 
+def apply_stereo_mask(
+    target_mono: torch.Tensor,
+    residual_mono: torch.Tensor,
+    model_sample_rate: int,
+    source_path: Path,
+) -> tuple[torch.Tensor, torch.Tensor, int]:
+    """Apply STFT Wiener mask from mono model output onto the original stereo audio.
+
+    This preserves the stereo image while using the model's separation as a guide.
+    Returns (target_stereo, residual_stereo, source_sample_rate).
+    """
+    source_waveform, source_sample_rate = torchaudio.load(str(source_path))
+    source = source_waveform.to(torch.float32)
+    n_channels = source.shape[0]
+
+    # If source is mono, just resample model output and return directly.
+    if n_channels == 1:
+        if model_sample_rate != source_sample_rate:
+            target_mono = torchaudio.functional.resample(target_mono, model_sample_rate, source_sample_rate)
+            residual_mono = torchaudio.functional.resample(residual_mono, model_sample_rate, source_sample_rate)
+        return target_mono, residual_mono, source_sample_rate
+
+    # Resample model outputs to source sample rate.
+    if model_sample_rate != source_sample_rate:
+        target_mono = torchaudio.functional.resample(target_mono, model_sample_rate, source_sample_rate)
+        residual_mono = torchaudio.functional.resample(residual_mono, model_sample_rate, source_sample_rate)
+
+    # Ensure mono shape (1D).
+    t = target_mono.squeeze(0) if target_mono.ndim > 1 else target_mono
+    r = residual_mono.squeeze(0) if residual_mono.ndim > 1 else residual_mono
+
+    # Trim/pad to match source length.
+    n_samples = source.shape[-1]
+    if t.shape[-1] > n_samples:
+        t = t[:n_samples]
+        r = r[:n_samples]
+    elif t.shape[-1] < n_samples:
+        pad = n_samples - t.shape[-1]
+        t = torch.nn.functional.pad(t, (0, pad))
+        r = torch.nn.functional.pad(r, (0, pad))
+
+    # STFT Wiener mask.
+    n_fft = 2048
+    hop_length = 512
+    window = torch.hann_window(n_fft)
+
+    t_stft = torch.stft(t, n_fft=n_fft, hop_length=hop_length, window=window, return_complex=True)
+    r_stft = torch.stft(r, n_fft=n_fft, hop_length=hop_length, window=window, return_complex=True)
+
+    eps = 1e-10
+    t_power = t_stft.abs().pow(2)
+    r_power = r_stft.abs().pow(2)
+    mask = t_power / (t_power + r_power + eps)
+
+    # Apply mask to each channel of the source.
+    target_channels = []
+    residual_channels = []
+    for ch in range(n_channels):
+        s_stft = torch.stft(source[ch], n_fft=n_fft, hop_length=hop_length, window=window, return_complex=True)
+        target_channels.append(torch.istft(s_stft * mask, n_fft=n_fft, hop_length=hop_length, window=window, length=n_samples))
+        residual_channels.append(torch.istft(s_stft * (1.0 - mask), n_fft=n_fft, hop_length=hop_length, window=window, length=n_samples))
+
+    return torch.stack(target_channels, dim=0), torch.stack(residual_channels, dim=0), source_sample_rate
+
+
 def save_waveform(path: Path, waveform: torch.Tensor, sample_rate: int) -> None:
     waveform = waveform.detach().to(torch.float32).cpu()
     if waveform.ndim == 1:
@@ -268,8 +333,6 @@ def build_separation_response(
     job_dir = output_dir / request_id
     job_dir.mkdir(parents=True, exist_ok=False)
 
-    # Output the raw model result directly (mono, at model sample rate).
-    # This matches Meta's demo exactly.
     target = target.detach().to(torch.float32).cpu()
     residual = residual.detach().to(torch.float32).cpu()
     if target.ndim == 1:
@@ -277,14 +340,28 @@ def build_separation_response(
     if residual.ndim == 1:
         residual = residual.unsqueeze(0)
 
+    # Apply STFT stereo mask if the source audio has multiple channels.
+    # This preserves the stereo image using the mono model output as a guide.
+    out_sr = sample_rate
+    try:
+        target, residual, out_sr = apply_stereo_mask(
+            target_mono=target,
+            residual_mono=residual,
+            model_sample_rate=sample_rate,
+            source_path=audio_path,
+        )
+    except Exception:
+        # If masking fails for any reason, fall back to raw mono output.
+        pass
+
     target_wav = job_dir / f"{output_prefix}_target.wav"
     residual_wav = job_dir / f"{output_prefix}_residual.wav"
     target_mp3 = job_dir / f"{output_prefix}_target.mp3"
     residual_mp3 = job_dir / f"{output_prefix}_residual.mp3"
     zip_path = job_dir / f"{output_prefix}_outputs.zip"
 
-    save_waveform(target_wav, target, sample_rate)
-    save_waveform(residual_wav, residual, sample_rate)
+    save_waveform(target_wav, target, out_sr)
+    save_waveform(residual_wav, residual, out_sr)
     wav_to_mp3(target_wav, target_mp3)
     wav_to_mp3(residual_wav, residual_mp3)
     zip_outputs([target_wav, residual_wav, target_mp3, residual_mp3], zip_path)
@@ -295,7 +372,7 @@ def build_separation_response(
         audio_path=str(audio_path),
         description=description,
         duration_seconds=float(duration_seconds),
-        sample_rate=sample_rate,
+        sample_rate=out_sr,
         target={"wav": public_file_ref(target_wav), "mp3": public_file_ref(target_mp3)},
         residual={"wav": public_file_ref(residual_wav), "mp3": public_file_ref(residual_mp3)},
         raw_target=None,
