@@ -448,7 +448,7 @@ def run_separation(
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
 
-    with _inference_lock, torch.autocast(device_type=state.device, dtype=state.dtype):
+    with _inference_lock:
         inputs = state.processor(**processor_kwargs).to(state.device)
         result = state.model.separate(
             inputs,
@@ -538,7 +538,7 @@ def run_separation_batch(
             if torch.cuda.is_available():
                 torch.cuda.reset_peak_memory_stats()
 
-            with _inference_lock, torch.autocast(device_type=state.device, dtype=state.dtype):
+            with _inference_lock:
                 inputs = state.processor(**processor_kwargs).to(state.device)
                 result = state.model.separate(
                     inputs,
