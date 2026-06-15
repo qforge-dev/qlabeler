@@ -228,6 +228,7 @@ class PipelineConfig:
     afnext_batch_size: int = 1
     chunk_ms: int = 30_000
     overlap_ms: int = 5_000
+    min_chunk_ms: int = 10_000
     sound_gate_min_dbfs: float = -50.0
     sound_gate_min_peak_dbfs: float = -55.0
     sound_gate_window_ms: int = 100
@@ -264,6 +265,7 @@ class PipelineConfig:
             afnext_batch_size=max(1, int(os.environ.get("PIPELINE_AFNEXT_BATCH_SIZE", "1"))),
             chunk_ms=int(os.environ.get("PIPELINE_CHUNK_SECONDS", "30")) * 1000,
             overlap_ms=int(os.environ.get("PIPELINE_OVERLAP_SECONDS", "5")) * 1000,
+            min_chunk_ms=int(os.environ.get("PIPELINE_MIN_CHUNK_SECONDS", "10")) * 1000,
             sound_gate_min_dbfs=float(os.environ.get("PIPELINE_SOUND_GATE_MIN_DBFS", "-50")),
             sound_gate_min_peak_dbfs=float(os.environ.get("PIPELINE_SOUND_GATE_MIN_PEAK_DBFS", "-55")),
             sound_gate_window_ms=int(os.environ.get("PIPELINE_SOUND_GATE_WINDOW_MS", "100")),
@@ -352,6 +354,8 @@ class PipelineRuntime:
                     prompt TEXT,
                     status TEXT NOT NULL,
                     chunk_count INTEGER NOT NULL DEFAULT 0,
+                    has_music INTEGER DEFAULT NULL,
+                    has_voices INTEGER DEFAULT NULL,
                     error TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
@@ -551,6 +555,9 @@ class PipelineRuntime:
             end_ms = min(start_ms + self.config.chunk_ms, duration_ms)
             if end_ms <= start_ms:
                 continue
+            chunk_duration_ms = end_ms - start_ms
+            if chunk_duration_ms < self.config.min_chunk_ms:
+                continue
             chunk_path = chunk_dir / f"chunk_{chunk_index:04d}_{start_ms:08d}-{end_ms:08d}.wav"
             segment[start_ms:end_ms].export(str(chunk_path), format="wav")
             chunks.append(
@@ -560,7 +567,7 @@ class PipelineRuntime:
                     "audio_path": str(chunk_path),
                     "start_ms": start_ms,
                     "end_ms": end_ms,
-                    "duration_ms": end_ms - start_ms,
+                    "duration_ms": chunk_duration_ms,
                 }
             )
 
@@ -851,22 +858,66 @@ class PipelineRuntime:
         with self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             if result["has_sound"]:
-                conn.execute(
-                    "UPDATE chunks SET stage = ?, error = NULL, updated_at = ? WHERE id = ?",
-                    (STAGE_SEPARATE_MUSIC, timestamp, task["chunk_id"]),
-                )
-                self._insert_task(
-                    conn,
-                    job_id=task["job_id"],
-                    chunk_id=task["chunk_id"],
-                    queue=TASK_SAM_AUDIO,
-                    payload={
-                        "purpose": PURPOSE_SEPARATE_MUSIC,
-                        "audio_path": str(audio_path),
-                        "prompt": "music",
-                    },
-                    created_at=timestamp,
-                )
+                # Check job-level has_music flag from scene description.
+                job_row = conn.execute(
+                    "SELECT has_music, has_voices FROM jobs WHERE id = ?", (task["job_id"],)
+                ).fetchone()
+                has_music = job_row["has_music"] if job_row and job_row["has_music"] is not None else 1
+                has_voices = job_row["has_voices"] if job_row and job_row["has_voices"] is not None else 1
+
+                if has_music:
+                    # Normal flow: separate music first.
+                    conn.execute(
+                        "UPDATE chunks SET stage = ?, error = NULL, updated_at = ? WHERE id = ?",
+                        (STAGE_SEPARATE_MUSIC, timestamp, task["chunk_id"]),
+                    )
+                    self._insert_task(
+                        conn,
+                        job_id=task["job_id"],
+                        chunk_id=task["chunk_id"],
+                        queue=TASK_SAM_AUDIO,
+                        payload={
+                            "purpose": PURPOSE_SEPARATE_MUSIC,
+                            "audio_path": str(audio_path),
+                            "prompt": "music",
+                        },
+                        created_at=timestamp,
+                    )
+                elif has_voices:
+                    # No music but has voices: separate voices directly from source.
+                    conn.execute(
+                        "UPDATE chunks SET stage = ?, error = NULL, updated_at = ? WHERE id = ?",
+                        (STAGE_SEPARATE_VOICES, timestamp, task["chunk_id"]),
+                    )
+                    self._insert_task(
+                        conn,
+                        job_id=task["job_id"],
+                        chunk_id=task["chunk_id"],
+                        queue=TASK_SAM_AUDIO,
+                        payload={
+                            "purpose": PURPOSE_SEPARATE_VOICES,
+                            "audio_path": str(audio_path),
+                            "prompt": "human voice",
+                        },
+                        created_at=timestamp,
+                    )
+                else:
+                    # No music, no voices: skip to SFX listing.
+                    conn.execute(
+                        "UPDATE chunks SET stage = ?, error = NULL, updated_at = ? WHERE id = ?",
+                        (STAGE_LIST_SFX, timestamp, task["chunk_id"]),
+                    )
+                    self._insert_task(
+                        conn,
+                        job_id=task["job_id"],
+                        chunk_id=task["chunk_id"],
+                        queue=TASK_AUDIO_FLAMINGO,
+                        payload={
+                            "purpose": PURPOSE_LIST_SFX,
+                            "audio_path": str(audio_path),
+                        },
+                        created_at=timestamp,
+                    )
                 message = "Sound gate passed"
             else:
                 conn.execute(
@@ -946,20 +997,41 @@ class PipelineRuntime:
                     message = "Music track gate skipped silent output"
             elif track_type == "sfx_voice":
                 if result["has_sound"]:
-                    self._insert_task(
-                        conn,
-                        job_id=task["job_id"],
-                        chunk_id=task["chunk_id"],
-                        queue=TASK_SAM_AUDIO,
-                        payload={
-                            "purpose": PURPOSE_SEPARATE_VOICES,
-                            "audio_path": audio_path,
-                            "prompt": "human voice",
-                            "source_artifact_id": payload.get("artifact_id"),
-                        },
-                        created_at=timestamp,
-                    )
-                    stage = STAGE_SEPARATE_VOICES
+                    # Check job-level has_voices before separating voice.
+                    job_row = conn.execute(
+                        "SELECT has_voices FROM jobs WHERE id = ?", (task["job_id"],)
+                    ).fetchone()
+                    has_voices = job_row["has_voices"] if job_row and job_row["has_voices"] is not None else 1
+                    if has_voices:
+                        self._insert_task(
+                            conn,
+                            job_id=task["job_id"],
+                            chunk_id=task["chunk_id"],
+                            queue=TASK_SAM_AUDIO,
+                            payload={
+                                "purpose": PURPOSE_SEPARATE_VOICES,
+                                "audio_path": audio_path,
+                                "prompt": "human voice",
+                                "source_artifact_id": payload.get("artifact_id"),
+                            },
+                            created_at=timestamp,
+                        )
+                        stage = STAGE_SEPARATE_VOICES
+                    else:
+                        # No voices: skip to SFX listing on this track.
+                        self._insert_task(
+                            conn,
+                            job_id=task["job_id"],
+                            chunk_id=task["chunk_id"],
+                            queue=TASK_AUDIO_FLAMINGO,
+                            payload={
+                                "purpose": PURPOSE_LIST_SFX,
+                                "audio_path": audio_path,
+                                "source_artifact_id": payload.get("artifact_id"),
+                            },
+                            created_at=timestamp,
+                        )
+                        stage = STAGE_LIST_SFX
                 else:
                     stage = STAGE_SKIPPED_SFX_VOICE
                 message = "SFX+voice track gate passed" if result["has_sound"] else "SFX+voice track gate skipped silent output"
@@ -1365,6 +1437,9 @@ class PipelineRuntime:
 
     def complete_scene_description(self, task: dict[str, Any], text: str, response: dict[str, Any]) -> None:
         timestamp = now_iso()
+        # Parse has_music / has_voices from the structured response.
+        has_music = self._parse_scene_bool(text, "HAS_MUSIC")
+        has_voices = self._parse_scene_bool(text, "HAS_VOICES")
         with self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             self._insert_artifact(
@@ -1375,13 +1450,18 @@ class PipelineRuntime:
                 kind=ARTIFACT_SCENE_DESCRIPTION,
                 text=text,
                 prompt=(json_loads(task["payload_json"], {}) or {}).get("prompt"),
-                metadata=response,
+                metadata={**response, "has_music": has_music, "has_voices": has_voices},
                 created_at=timestamp,
+            )
+            # Store has_music/has_voices on the job for downstream decisions.
+            conn.execute(
+                "UPDATE jobs SET has_music = ?, has_voices = ?, updated_at = ? WHERE id = ?",
+                (int(has_music), int(has_voices), timestamp, task["job_id"]),
             )
             self._complete_task_conn(
                 conn,
                 task["id"],
-                {"text": text, "backend": self.config.backend},
+                {"text": text, "backend": self.config.backend, "has_music": has_music, "has_voices": has_voices},
                 timestamp,
             )
             self._insert_event(
@@ -1390,12 +1470,23 @@ class PipelineRuntime:
                 chunk_id=None,
                 task_id=task["id"],
                 level="info",
-                message="Audio Flamingo described whole scene",
-                data={"text": text},
+                message=f"Scene described: has_music={has_music}, has_voices={has_voices}",
+                data={"text": text, "has_music": has_music, "has_voices": has_voices},
                 created_at=timestamp,
             )
             self._update_job_status_conn(conn, task["job_id"], timestamp)
             conn.execute("COMMIT")
+
+    @staticmethod
+    def _parse_scene_bool(text: str, key: str) -> bool:
+        """Parse a boolean like 'HAS_MUSIC: true' from the scene description text."""
+        import re
+        pattern = rf"(?i){re.escape(key)}\s*:\s*(true|false|yes|no|1|0)"
+        match = re.search(pattern, text)
+        if match:
+            return match.group(1).lower() in ("true", "yes", "1")
+        # Fallback: assume true if not explicitly stated (conservative).
+        return True
 
     def complete_music_description(self, task: dict[str, Any], text: str, response: dict[str, Any]) -> None:
         payload = json_loads(task["payload_json"], {})
@@ -2171,8 +2262,11 @@ class PipelineRuntime:
         if override and override.strip():
             return override.strip()
         return (
-            "Describe the whole audio scene concisely. Include the setting, music, voices, "
-            "and notable sound effects if present."
+            "Listen to the whole audio and answer in exactly this format:\n"
+            "HAS_MUSIC: true or false\n"
+            "HAS_VOICES: true or false\n"
+            "DESCRIPTION: <one sentence describing the audio scene>\n"
+            "Reply with nothing else."
         )
 
     def default_audio_flamingo_prompt(self, job_id: str) -> str:
@@ -2738,7 +2832,11 @@ class PipelineRuntime:
                 },
             )
         ]
+        # Only include target/stem tracks, not residuals.
+        _RESIDUAL_KINDS = {ARTIFACT_SFX_VOICE_TRACK, ARTIFACT_SFX_TRACK, ARTIFACT_SFX_REMAINING_TRACK}
         for artifact in artifact_rows:
+            if artifact.get("kind") in _RESIDUAL_KINDS:
+                continue
             audio = self.preferred_artifact_audio_ref(artifact)
             lanes.append(
                 self.waveform_lane(
@@ -2913,12 +3011,32 @@ DASHBOARD_HTML = """<!doctype html>
     .status-failed { color: #c53232; font-weight: 650; }
     .status-complete, .status-completed { color: #18733f; font-weight: 650; }
     .status-running { color: #9a5a00; font-weight: 650; }
+    /* DAW multitrack styles */
+    .daw-transport { display: flex; align-items: center; gap: 10px; margin-top: 14px; padding: 8px 12px; background: #1a1a2e; border-radius: 6px; }
+    .daw-btn { background: #2a2a4a; color: #fff; border: 1px solid #444; border-radius: 4px; padding: 6px 14px; font-size: 13px; cursor: pointer; font-family: inherit; }
+    .daw-btn:hover { background: #3a3a5a; }
+    .daw-time { color: #6ddf6d; font-family: 'SF Mono', monospace; font-size: 13px; margin-left: 8px; }
+    .daw-tracks { display: flex; flex-direction: column; gap: 0; margin-top: 0; border: 1px solid #333; border-radius: 6px; overflow: hidden; }
+    .daw-track { display: grid; grid-template-columns: 180px 1fr; border-bottom: 1px solid #2a2a3a; background: #1e1e2e; }
+    .daw-track:last-child { border-bottom: none; }
+    .daw-track-source { background: #1e2a1e; }
+    .daw-track-header { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-right: 1px solid #333; }
+    .daw-mute-btn { background: #2a4a2a; color: #6ddf6d; border: 1px solid #3a5a3a; border-radius: 4px; width: 32px; height: 32px; cursor: pointer; font-size: 16px; display: flex; align-items: center; justify-content: center; }
+    .daw-mute-btn.muted { background: #4a2a2a; color: #df6d6d; border-color: #5a3a3a; }
+    .daw-track-info { min-width: 0; }
+    .daw-track-title { font-weight: 700; font-size: 12px; color: #e0e0e0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .daw-track-kind { font-size: 11px; color: #888; }
+    .daw-track-waveform { position: relative; padding: 4px 0; cursor: pointer; }
+    .daw-track-waveform .waveform-canvas { width: 100%; height: 48px; display: block; border: none; border-radius: 0; background: transparent; }
+    .daw-playhead { position: absolute; top: 0; bottom: 0; width: 2px; background: #ff4444; left: 0; pointer-events: none; transition: left 0.05s linear; }
+    .daw-track audio { display: none; }
     @media (max-width: 720px) {
       body { min-width: 360px; }
       main, header { padding-left: 14px; padding-right: 14px; }
       .section-head { align-items: flex-start; flex-direction: column; }
       .node-inspector { grid-template-columns: 1fr; }
       .waveform-lane { grid-template-columns: 1fr; }
+      .daw-track { grid-template-columns: 120px 1fr; }
     }
   </style>
 </head>
@@ -3610,8 +3728,7 @@ DASHBOARD_HTML = """<!doctype html>
     function laneAudio(lane) {
       const ref = lane.audio || {};
       const href = ref.url || '';
-      const player = href ? `<audio controls preload="none" src="${esc(href)}"></audio>` : '';
-      return `${link(ref)}${player}`;
+      return href;
     }
 
     function renderChunkDetail(data) {
@@ -3629,27 +3746,108 @@ DASHBOARD_HTML = """<!doctype html>
             <span class="status-pill">Duration <strong>${formatMs(chunk.duration_ms)}</strong></span>
           </div>
         </div>
-        <div class="waveform-list">
+        <div class="daw-transport">
+          <button id="daw-play" class="daw-btn">&#9654; Play</button>
+          <button id="daw-stop" class="daw-btn">&#9632; Stop</button>
+          <span id="daw-time" class="daw-time">0:00.0 / ${formatMs(chunk.duration_ms)}</span>
+        </div>
+        <div class="daw-tracks" id="daw-tracks">
           ${lanes.map((lane, index) => {
+            const href = laneAudio(lane);
             const waveform = lane.waveform || {};
-            const unavailable = lane.waveform_unavailable ? `<div class="waveform-subtitle">${esc(lane.waveform_unavailable)}</div>` : '';
+            const isSource = lane.kind === 'source_chunk';
             return `
-              <div class="waveform-lane">
-                <div class="waveform-label">
-                  <div class="waveform-title">${esc(lane.label)}</div>
-                  <div class="waveform-subtitle"><code>${esc(lane.kind)}</code></div>
-                  ${lane.metadata && lane.metadata.prompt ? `<div class="waveform-subtitle">${esc(lane.metadata.prompt)}</div>` : ''}
-                  ${laneAudio(lane)}
+              <div class="daw-track ${isSource ? 'daw-track-source' : ''}" data-lane-index="${index}">
+                <div class="daw-track-header">
+                  <button class="daw-mute-btn ${isSource ? '' : 'muted'}" data-lane-index="${index}" title="Toggle mute">
+                    ${isSource ? '&#128264;' : '&#128263;'}
+                  </button>
+                  <div class="daw-track-info">
+                    <div class="daw-track-title">${esc(lane.label)}</div>
+                    <div class="daw-track-kind"><code>${esc(lane.kind)}</code></div>
+                  </div>
                 </div>
-                <div class="waveform-panel">
-                  <div class="waveform-scale"><span>0</span><span>${formatMs(waveform.duration_ms || chunk.duration_ms)}</span></div>
-                  <canvas class="waveform-canvas" data-lane-index="${index}" width="900" height="68"></canvas>
-                  ${unavailable}
+                <div class="daw-track-waveform">
+                  <canvas class="waveform-canvas" data-lane-index="${index}" width="900" height="48"></canvas>
+                  <div class="daw-playhead" data-lane-index="${index}"></div>
                 </div>
+                <audio preload="auto" src="${esc(href)}" data-lane-index="${index}" ${isSource ? '' : 'muted'}></audio>
               </div>`;
-          }).join('') || '<div class="view-empty">No waveform lanes.</div>'}
+          }).join('') || '<div class="view-empty">No tracks.</div>'}
         </div>`;
       drawWaveforms(lanes);
+      initDAW(lanes, chunk.duration_ms || 0);
+    }
+
+    function initDAW(lanes, durationMs) {
+      const audios = Array.from(document.querySelectorAll('#daw-tracks audio'));
+      const playBtn = document.getElementById('daw-play');
+      const stopBtn = document.getElementById('daw-stop');
+      const timeEl = document.getElementById('daw-time');
+      const playheads = document.querySelectorAll('.daw-playhead');
+      let playing = false;
+      let rafId = null;
+
+      function updateTime() {
+        const master = audios[0];
+        if (!master) return;
+        const current = master.currentTime * 1000;
+        timeEl.textContent = `${formatMs(Math.floor(current))} / ${formatMs(durationMs)}`;
+        const pct = durationMs > 0 ? (current / durationMs) * 100 : 0;
+        playheads.forEach(ph => { ph.style.left = `${Math.min(100, pct)}%`; });
+        if (playing) rafId = requestAnimationFrame(updateTime);
+      }
+
+      function playAll() {
+        audios.forEach(a => { a.currentTime = audios[0] ? audios[0].currentTime : 0; a.play(); });
+        playing = true;
+        playBtn.innerHTML = '&#10074;&#10074; Pause';
+        updateTime();
+      }
+
+      function pauseAll() {
+        audios.forEach(a => a.pause());
+        playing = false;
+        playBtn.innerHTML = '&#9654; Play';
+        if (rafId) cancelAnimationFrame(rafId);
+      }
+
+      function stopAll() {
+        pauseAll();
+        audios.forEach(a => { a.currentTime = 0; });
+        updateTime();
+      }
+
+      playBtn.addEventListener('click', () => { playing ? pauseAll() : playAll(); });
+      stopBtn.addEventListener('click', stopAll);
+
+      // Master ended
+      if (audios[0]) {
+        audios[0].addEventListener('ended', () => { pauseAll(); updateTime(); });
+      }
+
+      // Mute/unmute buttons
+      document.querySelectorAll('.daw-mute-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const idx = parseInt(btn.dataset.laneIndex, 10);
+          const audio = audios[idx];
+          if (!audio) return;
+          audio.muted = !audio.muted;
+          btn.classList.toggle('muted', audio.muted);
+          btn.innerHTML = audio.muted ? '&#128263;' : '&#128264;';
+        });
+      });
+
+      // Click on waveform to seek
+      document.querySelectorAll('.daw-track-waveform').forEach(wf => {
+        wf.addEventListener('click', (e) => {
+          const rect = wf.getBoundingClientRect();
+          const pct = (e.clientX - rect.left) / rect.width;
+          const seekTime = (pct * durationMs) / 1000;
+          audios.forEach(a => { a.currentTime = seekTime; });
+          updateTime();
+        });
+      });
     }
 
     function drawWaveforms(lanes) {
@@ -3658,24 +3856,27 @@ DASHBOARD_HTML = """<!doctype html>
         const peaks = (lane.waveform || {}).peaks || [];
         const ratio = window.devicePixelRatio || 1;
         const cssWidth = Math.max(1, canvas.clientWidth || 900);
-        const cssHeight = Math.max(1, canvas.clientHeight || 68);
+        const cssHeight = Math.max(1, canvas.clientHeight || 48);
         canvas.width = Math.floor(cssWidth * ratio);
         canvas.height = Math.floor(cssHeight * ratio);
         const ctx = canvas.getContext('2d');
         ctx.scale(ratio, ratio);
         ctx.clearRect(0, 0, cssWidth, cssHeight);
-        ctx.fillStyle = '#ffffff';
+        // Dark background for DAW tracks
+        const isDaw = canvas.closest('.daw-track');
+        ctx.fillStyle = isDaw ? 'transparent' : '#ffffff';
         ctx.fillRect(0, 0, cssWidth, cssHeight);
-        ctx.strokeStyle = '#d9dee7';
+        ctx.strokeStyle = isDaw ? '#333' : '#d9dee7';
         ctx.beginPath();
         ctx.moveTo(0, cssHeight / 2);
         ctx.lineTo(cssWidth, cssHeight / 2);
         ctx.stroke();
         if (!peaks.length) return;
         const barWidth = cssWidth / peaks.length;
-        ctx.fillStyle = '#2f7de1';
+        const isSource = lane.kind === 'source_chunk';
+        ctx.fillStyle = isDaw ? (isSource ? '#4ddf4d' : '#5599ee') : '#2f7de1';
         peaks.forEach((peak, index) => {
-          const height = Math.max(1, peak * (cssHeight - 12));
+          const height = Math.max(1, peak * (cssHeight - 8));
           const x = index * barWidth;
           const y = (cssHeight - height) / 2;
           ctx.fillRect(x, y, Math.max(1, barWidth - 1), height);
