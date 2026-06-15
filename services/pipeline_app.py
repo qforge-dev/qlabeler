@@ -2078,6 +2078,8 @@ class PipelineRuntime:
                 },
                 created_at=timestamp,
             )
+
+            remaining_artifact_id = self._insert_artifact(
                 conn,
                 job_id=task["job_id"],
                 chunk_id=task["chunk_id"],
