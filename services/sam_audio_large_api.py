@@ -40,8 +40,8 @@ warnings.filterwarnings("ignore", message="The pynvml package is deprecated.*", 
 
 MODEL_ID = os.environ.get("SAM_AUDIO_MODEL_ID", "facebook/sam-audio-large")
 DEFAULT_MAX_AUDIO_SECONDS = float(os.environ.get("SAM_AUDIO_MAX_AUDIO_SECONDS", "35"))
-DEFAULT_PREDICT_SPANS = parse_bool(os.environ.get("SAM_AUDIO_PREDICT_SPANS"), default=False)
-DEFAULT_RERANKING_CANDIDATES = int(os.environ.get("SAM_AUDIO_RERANKING_CANDIDATES", "1"))
+DEFAULT_PREDICT_SPANS = parse_bool(os.environ.get("SAM_AUDIO_PREDICT_SPANS"), default=True)
+DEFAULT_RERANKING_CANDIDATES = int(os.environ.get("SAM_AUDIO_RERANKING_CANDIDATES", "8"))
 MAX_BATCH = max(1, int(os.environ.get("SAM_AUDIO_MAX_BATCH", "4")))
 
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
