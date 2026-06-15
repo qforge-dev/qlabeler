@@ -223,69 +223,117 @@ def result_component(value: Any, index: int) -> torch.Tensor:
     return value
 
 
-def apply_stereo_mask(
+def apply_stereo_panning(
     target_mono: torch.Tensor,
     residual_mono: torch.Tensor,
     model_sample_rate: int,
     source_path: Path,
 ) -> tuple[torch.Tensor, torch.Tensor, int]:
-    """Apply STFT Wiener mask from mono model output onto the original stereo audio.
+    """Transfer stereo panning and volume from the original mix onto the mono separated signals.
 
-    This preserves the stereo image while using the model's separation as a guide.
-    Returns (target_stereo, residual_stereo, source_sample_rate).
+    Instead of masking the original (which destroys phase coherence and causes mushiness),
+    we BUILD the stereo output from the clean mono separation and borrow only the spatial
+    characteristics (panning + volume) from the original.
+
+    For each time-frequency bin:
+      - Panning: L/R balance from the original mix
+      - Volume: scaled so total energy matches the source fraction of the original
+      - Phase: kept from the separated signal (coherent, no artifacts)
     """
-    source_waveform, source_sample_rate = torchaudio.load(str(source_path))
+    source_waveform, source_sr = torchaudio.load(str(source_path))
     source = source_waveform.to(torch.float32)
     n_channels = source.shape[0]
 
-    # If source is mono, just resample model output and return directly.
+    # If source is mono, just resample and volume-match.
     if n_channels == 1:
-        if model_sample_rate != source_sample_rate:
-            target_mono = torchaudio.functional.resample(target_mono, model_sample_rate, source_sample_rate)
-            residual_mono = torchaudio.functional.resample(residual_mono, model_sample_rate, source_sample_rate)
-        return target_mono, residual_mono, source_sample_rate
+        if model_sample_rate != source_sr:
+            target_mono = torchaudio.functional.resample(target_mono, model_sample_rate, source_sr)
+            residual_mono = torchaudio.functional.resample(residual_mono, model_sample_rate, source_sr)
+        # Volume match: scale to match source RMS
+        src_rms = source.pow(2).mean().sqrt().item()
+        for wav in (target_mono, residual_mono):
+            w_rms = wav.pow(2).mean().sqrt().item()
+            if w_rms > 1e-8 and src_rms > 0:
+                wav.mul_(src_rms / w_rms)
+        return target_mono, residual_mono, source_sr
 
     # Resample model outputs to source sample rate.
-    if model_sample_rate != source_sample_rate:
-        target_mono = torchaudio.functional.resample(target_mono, model_sample_rate, source_sample_rate)
-        residual_mono = torchaudio.functional.resample(residual_mono, model_sample_rate, source_sample_rate)
+    if model_sample_rate != source_sr:
+        target_mono = torchaudio.functional.resample(target_mono, model_sample_rate, source_sr)
+        residual_mono = torchaudio.functional.resample(residual_mono, model_sample_rate, source_sr)
 
-    # Ensure mono shape (1D).
-    t = target_mono.squeeze(0) if target_mono.ndim > 1 else target_mono
-    r = residual_mono.squeeze(0) if residual_mono.ndim > 1 else residual_mono
+    # Ensure 1D mono
+    t_mono = target_mono.squeeze(0) if target_mono.ndim > 1 else target_mono
+    r_mono = residual_mono.squeeze(0) if residual_mono.ndim > 1 else residual_mono
 
-    # Trim/pad to match source length.
+    # Trim/pad to match source length
     n_samples = source.shape[-1]
-    if t.shape[-1] > n_samples:
-        t = t[:n_samples]
-        r = r[:n_samples]
-    elif t.shape[-1] < n_samples:
-        pad = n_samples - t.shape[-1]
-        t = torch.nn.functional.pad(t, (0, pad))
-        r = torch.nn.functional.pad(r, (0, pad))
+    if t_mono.shape[-1] > n_samples:
+        t_mono = t_mono[:n_samples]
+        r_mono = r_mono[:n_samples]
+    elif t_mono.shape[-1] < n_samples:
+        pad = n_samples - t_mono.shape[-1]
+        t_mono = torch.nn.functional.pad(t_mono, (0, pad))
+        r_mono = torch.nn.functional.pad(r_mono, (0, pad))
 
-    # STFT Wiener mask.
+    # STFT parameters
     n_fft = 2048
     hop_length = 512
     window = torch.hann_window(n_fft)
 
-    t_stft = torch.stft(t, n_fft=n_fft, hop_length=hop_length, window=window, return_complex=True)
-    r_stft = torch.stft(r, n_fft=n_fft, hop_length=hop_length, window=window, return_complex=True)
+    # Compute STFTs
+    orig_L = torch.stft(source[0], n_fft=n_fft, hop_length=hop_length, window=window, return_complex=True)
+    orig_R = torch.stft(source[1], n_fft=n_fft, hop_length=hop_length, window=window, return_complex=True)
+    target_stft = torch.stft(t_mono, n_fft=n_fft, hop_length=hop_length, window=window, return_complex=True)
+    residual_stft = torch.stft(r_mono, n_fft=n_fft, hop_length=hop_length, window=window, return_complex=True)
 
     eps = 1e-10
-    t_power = t_stft.abs().pow(2)
-    r_power = r_stft.abs().pow(2)
-    mask = t_power / (t_power + r_power + eps)
 
-    # Apply mask to each channel of the source.
-    target_channels = []
-    residual_channels = []
-    for ch in range(n_channels):
-        s_stft = torch.stft(source[ch], n_fft=n_fft, hop_length=hop_length, window=window, return_complex=True)
-        target_channels.append(torch.istft(s_stft * mask, n_fft=n_fft, hop_length=hop_length, window=window, length=n_samples))
-        residual_channels.append(torch.istft(s_stft * (1.0 - mask), n_fft=n_fft, hop_length=hop_length, window=window, length=n_samples))
+    # Per-bin panning from original mix
+    orig_L_mag = orig_L.abs()
+    orig_R_mag = orig_R.abs()
+    pan_L = orig_L_mag / (orig_L_mag + orig_R_mag + eps)
+    pan_R = 1.0 - pan_L
 
-    return torch.stack(target_channels, dim=0), torch.stack(residual_channels, dim=0), source_sample_rate
+    # Per-bin volume transfer: scale the separated signal to match the original's energy
+    # proportional to how much of the original this source represents.
+    orig_energy = orig_L_mag.pow(2) + orig_R_mag.pow(2)  # total stereo energy
+    target_mag = target_stft.abs()
+    residual_mag = residual_stft.abs()
+    source_fraction = target_mag.pow(2) / (target_mag.pow(2) + residual_mag.pow(2) + eps)
+
+    # Target energy should be this fraction of the original
+    target_energy = source_fraction * orig_energy
+    # Gain to apply (per bin) — scales mono separated magnitude to match correct energy level
+    mono_energy = target_mag.pow(2) + eps
+    gain_target = (target_energy / mono_energy).sqrt().clamp(max=10.0)  # clamp to avoid explosion
+
+    # Same for residual
+    residual_fraction = 1.0 - source_fraction
+    residual_energy = residual_fraction * orig_energy
+    residual_mono_energy = residual_mag.pow(2) + eps
+    gain_residual = (residual_energy / residual_mono_energy).sqrt().clamp(max=10.0)
+
+    # Build stereo outputs: separated_signal * gain * pan (keeps separated phase intact)
+    target_out_L = target_stft * gain_target * pan_L
+    target_out_R = target_stft * gain_target * pan_R
+    residual_out_L = residual_stft * gain_residual * pan_L
+    residual_out_R = residual_stft * gain_residual * pan_R
+
+    # ISTFT back to time domain
+    target_L = torch.istft(target_out_L, n_fft=n_fft, hop_length=hop_length, window=window, length=n_samples)
+    target_R = torch.istft(target_out_R, n_fft=n_fft, hop_length=hop_length, window=window, length=n_samples)
+    residual_L = torch.istft(residual_out_L, n_fft=n_fft, hop_length=hop_length, window=window, length=n_samples)
+    residual_R = torch.istft(residual_out_R, n_fft=n_fft, hop_length=hop_length, window=window, length=n_samples)
+
+    target_stereo = torch.stack([target_L, target_R], dim=0)
+    residual_stereo = torch.stack([residual_L, residual_R], dim=0)
+
+    # Safety: clamp to avoid clipping
+    target_stereo = target_stereo.clamp(-1.0, 1.0)
+    residual_stereo = residual_stereo.clamp(-1.0, 1.0)
+
+    return target_stereo, residual_stereo, source_sr
 
 
 def save_waveform(path: Path, waveform: torch.Tensor, sample_rate: int) -> None:
@@ -340,18 +388,17 @@ def build_separation_response(
     if residual.ndim == 1:
         residual = residual.unsqueeze(0)
 
-    # Apply STFT stereo mask if the source audio has multiple channels.
-    # This preserves the stereo image using the mono model output as a guide.
+    # Apply stereo panning + volume transfer from original onto the clean mono separation.
     out_sr = sample_rate
     try:
-        target, residual, out_sr = apply_stereo_mask(
+        target, residual, out_sr = apply_stereo_panning(
             target_mono=target,
             residual_mono=residual,
             model_sample_rate=sample_rate,
             source_path=audio_path,
         )
     except Exception:
-        # If masking fails for any reason, fall back to raw mono output.
+        # If stereo transfer fails, fall back to raw mono output.
         pass
 
     target_wav = job_dir / f"{output_prefix}_target.wav"
