@@ -221,27 +221,68 @@ def result_component(value: Any, index: int) -> torch.Tensor:
 
 
 def match_source_format(
-    waveform: torch.Tensor,
+    target: torch.Tensor,
+    residual: torch.Tensor,
     model_sample_rate: int,
     source_sample_rate: int,
     source_channels: int,
-    source_rms: float | None,
-) -> tuple[torch.Tensor, int]:
-    """Resample, match channel count, and scale volume to match the source audio."""
-    if waveform.ndim == 1:
-        waveform = waveform.unsqueeze(0)
-    # Resample to original sample rate if different.
+    source_waveform: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, int]:
+    """Apply separation as a soft mask on the original stereo/multichannel audio.
+
+    Instead of just duplicating mono to stereo, we compute a time-domain mask
+    from the model's mono separation and apply it to each channel of the original
+    signal independently.  This preserves the stereo image (panning, spatial cues).
+
+    Mask = |target| / (|target| + |residual| + eps)
+    target_out = original * mask
+    residual_out = original * (1 - mask)
+    """
+    if target.ndim == 1:
+        target = target.unsqueeze(0)
+    if residual.ndim == 1:
+        residual = residual.unsqueeze(0)
+
+    # Resample model outputs to source sample rate for mask computation.
     if model_sample_rate != source_sample_rate:
-        waveform = torchaudio.functional.resample(waveform, model_sample_rate, source_sample_rate)
-    # Expand mono to stereo if source was stereo (duplicate channel).
-    if source_channels >= 2 and waveform.shape[0] == 1:
-        waveform = waveform.expand(source_channels, -1)
-    # Scale amplitude to match source RMS.
-    if source_rms is not None and source_rms > 0:
-        output_rms = waveform.pow(2).mean().sqrt().item()
-        if output_rms > 1e-8:
-            waveform = waveform * (source_rms / output_rms)
-    return waveform, source_sample_rate
+        target = torchaudio.functional.resample(target, model_sample_rate, source_sample_rate)
+        residual = torchaudio.functional.resample(residual, model_sample_rate, source_sample_rate)
+
+    # Ensure source waveform is float32 for arithmetic.
+    source = source_waveform.to(torch.float32)
+
+    # If source is mono or model output matches channels, just return resampled + volume-matched.
+    if source_channels == 1:
+        # Scale to match source RMS.
+        source_rms = source.pow(2).mean().sqrt().item()
+        for wav in (target, residual):
+            out_rms = wav.pow(2).mean().sqrt().item()
+            if out_rms > 1e-8 and source_rms > 0:
+                wav.mul_(source_rms / out_rms)
+        return target, residual, source_sample_rate
+
+    # --- Stereo/multichannel mask-based separation ---
+    # Trim or pad to match lengths (resampling can cause off-by-one).
+    n_samples = source.shape[-1]
+    if target.shape[-1] > n_samples:
+        target = target[..., :n_samples]
+        residual = residual[..., :n_samples]
+    elif target.shape[-1] < n_samples:
+        pad = n_samples - target.shape[-1]
+        target = torch.nn.functional.pad(target, (0, pad))
+        residual = torch.nn.functional.pad(residual, (0, pad))
+
+    # Compute soft mask from magnitudes (mono).
+    eps = 1e-8
+    target_abs = target.abs()
+    residual_abs = residual.abs()
+    mask = target_abs / (target_abs + residual_abs + eps)  # shape: (1, samples)
+
+    # Apply mask to each channel of the source.
+    target_out = source * mask
+    residual_out = source * (1.0 - mask)
+
+    return target_out, residual_out, source_sample_rate
 
 
 def save_waveform(path: Path, waveform: torch.Tensor, sample_rate: int) -> None:
@@ -285,28 +326,22 @@ def build_separation_response(
     peak_reserved: float | None,
     source_sample_rate: int | None = None,
     source_channels: int | None = None,
-    source_rms: float | None = None,
+    source_waveform: torch.Tensor | None = None,
 ) -> SeparateResponse:
     request_id = uuid.uuid4().hex
     job_dir = output_dir / request_id
     job_dir.mkdir(parents=True, exist_ok=False)
 
-    # Match source audio format (sample rate, channels, volume).
+    # Match source audio format (sample rate, channels, volume) using mask-based separation.
     out_sr = sample_rate
-    if source_sample_rate and source_channels:
-        target, out_sr = match_source_format(
-            target.detach().to(torch.float32).cpu(),
+    if source_sample_rate and source_channels and source_waveform is not None:
+        target, residual, out_sr = match_source_format(
+            target=target.detach().to(torch.float32).cpu(),
+            residual=residual.detach().to(torch.float32).cpu(),
             model_sample_rate=sample_rate,
             source_sample_rate=source_sample_rate,
             source_channels=source_channels,
-            source_rms=source_rms,
-        )
-        residual, _ = match_source_format(
-            residual.detach().to(torch.float32).cpu(),
-            model_sample_rate=sample_rate,
-            source_sample_rate=source_sample_rate,
-            source_channels=source_channels,
-            source_rms=source_rms,
+            source_waveform=source_waveform,
         )
 
     target_wav = job_dir / f"{output_prefix}_target.wav"
@@ -361,12 +396,11 @@ def run_separation(
             "Split longer audio before sending it to SAM-Audio."
         )
 
-    # Read source audio metadata for post-processing (sample rate, channels, RMS).
+    # Read source audio metadata for post-processing (sample rate, channels, waveform).
     source_info = torchaudio.info(str(audio_path))
     source_sample_rate = source_info.sample_rate
     source_channels = source_info.num_channels
-    source_wav, _ = torchaudio.load(str(audio_path))
-    source_rms = source_wav.pow(2).mean().sqrt().item()
+    source_waveform, _ = torchaudio.load(str(audio_path))
 
     processor_kwargs: dict[str, Any] = {
         "audios": [str(audio_path)],
@@ -406,7 +440,7 @@ def run_separation(
         peak_reserved=peak_reserved,
         source_sample_rate=source_sample_rate,
         source_channels=source_channels,
-        source_rms=source_rms,
+        source_waveform=source_waveform,
     )
 
 
@@ -439,7 +473,6 @@ def run_separation_batch(
             # Read source audio metadata.
             source_info = torchaudio.info(str(audio_path))
             source_wav, _ = torchaudio.load(str(audio_path))
-            source_rms = source_wav.pow(2).mean().sqrt().item()
             valid.append(
                 {
                     "index": index,
@@ -450,7 +483,7 @@ def run_separation_batch(
                     "output_prefix": safe_prefix(item.output_prefix),
                     "source_sample_rate": source_info.sample_rate,
                     "source_channels": source_info.num_channels,
-                    "source_rms": source_rms,
+                    "source_waveform": source_wav,
                 }
             )
         except Exception as exc:
@@ -505,7 +538,7 @@ def run_separation_batch(
                         peak_reserved=peak_reserved,
                         source_sample_rate=entry["source_sample_rate"],
                         source_channels=entry["source_channels"],
-                        source_rms=entry["source_rms"],
+                        source_waveform=entry["source_waveform"],
                     )
                 )
             except Exception as exc:
