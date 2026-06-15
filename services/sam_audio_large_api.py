@@ -91,6 +91,8 @@ class SeparateResponse(BaseModel):
     sample_rate: int
     target: dict[str, dict[str, str]]
     residual: dict[str, dict[str, str]]
+    raw_target: dict[str, dict[str, str]] | None = None
+    raw_residual: dict[str, dict[str, str]] | None = None
     zip: dict[str, str]
     peak_cuda_allocated_gb: float | None = None
     peak_cuda_reserved_gb: float | None = None
@@ -344,7 +346,31 @@ def build_separation_response(
 
     # Match source audio format (sample rate, channels, volume) using mask-based separation.
     out_sr = sample_rate
+    raw_target_ref = None
+    raw_residual_ref = None
     if source_sample_rate and source_channels and source_waveform is not None:
+        # Save raw model output (resampled but not masked) for comparison.
+        raw_target_tensor = target.detach().to(torch.float32).cpu()
+        raw_residual_tensor = residual.detach().to(torch.float32).cpu()
+        if raw_target_tensor.ndim == 1:
+            raw_target_tensor = raw_target_tensor.unsqueeze(0)
+        if raw_residual_tensor.ndim == 1:
+            raw_residual_tensor = raw_residual_tensor.unsqueeze(0)
+        if sample_rate != source_sample_rate:
+            raw_target_tensor = torchaudio.functional.resample(raw_target_tensor, sample_rate, source_sample_rate)
+            raw_residual_tensor = torchaudio.functional.resample(raw_residual_tensor, sample_rate, source_sample_rate)
+        raw_target_mp3 = job_dir / f"{output_prefix}_raw_target.mp3"
+        raw_residual_mp3 = job_dir / f"{output_prefix}_raw_residual.mp3"
+        raw_target_wav = job_dir / f"{output_prefix}_raw_target.wav"
+        raw_residual_wav = job_dir / f"{output_prefix}_raw_residual.wav"
+        save_waveform(raw_target_wav, raw_target_tensor, source_sample_rate)
+        save_waveform(raw_residual_wav, raw_residual_tensor, source_sample_rate)
+        wav_to_mp3(raw_target_wav, raw_target_mp3)
+        wav_to_mp3(raw_residual_wav, raw_residual_mp3)
+        raw_target_ref = {"wav": public_file_ref(raw_target_wav), "mp3": public_file_ref(raw_target_mp3)}
+        raw_residual_ref = {"wav": public_file_ref(raw_residual_wav), "mp3": public_file_ref(raw_residual_mp3)}
+
+        # Now compute STFT-masked version.
         target, residual, out_sr = match_source_format(
             target=target.detach().to(torch.float32).cpu(),
             residual=residual.detach().to(torch.float32).cpu(),
@@ -375,6 +401,8 @@ def build_separation_response(
         sample_rate=out_sr,
         target={"wav": public_file_ref(target_wav), "mp3": public_file_ref(target_mp3)},
         residual={"wav": public_file_ref(residual_wav), "mp3": public_file_ref(residual_mp3)},
+        raw_target=raw_target_ref,
+        raw_residual=raw_residual_ref,
         zip=public_file_ref(zip_path),
         peak_cuda_allocated_gb=peak_allocated,
         peak_cuda_reserved_gb=peak_reserved,

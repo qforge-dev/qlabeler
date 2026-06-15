@@ -126,9 +126,11 @@ PURPOSES = (
 
 ARTIFACT_SCENE_DESCRIPTION = "scene_description"
 ARTIFACT_MUSIC_TRACK = "music_track"
+ARTIFACT_MUSIC_TRACK_RAW = "music_track_raw"
 ARTIFACT_SFX_VOICE_TRACK = "sfx_voice_track"
 ARTIFACT_MUSIC_DESCRIPTION = "music_description"
 ARTIFACT_VOICE_TRACK = "voice_track"
+ARTIFACT_VOICE_TRACK_RAW = "voice_track_raw"
 ARTIFACT_SFX_TRACK = "sfx_track"
 ARTIFACT_VOICE_TRANSCRIPTION = "voice_transcription"
 ARTIFACT_SFX_LIST = "sfx_list"
@@ -138,8 +140,10 @@ ARTIFACT_SFX_LOOP_DEBUG = "sfx_loop_debug"
 ARTIFACT_SOUND_GATE = "sound_gate"
 SOUND_AUDIO_ARTIFACT_KINDS = (
     ARTIFACT_MUSIC_TRACK,
+    ARTIFACT_MUSIC_TRACK_RAW,
     ARTIFACT_SFX_VOICE_TRACK,
     ARTIFACT_VOICE_TRACK,
+    ARTIFACT_VOICE_TRACK_RAW,
     ARTIFACT_SFX_TRACK,
     ARTIFACT_SFX_ISOLATED_TRACK,
     ARTIFACT_SFX_REMAINING_TRACK,
@@ -1725,6 +1729,7 @@ class PipelineRuntime:
         timestamp = now_iso()
         target = response.get("target") or {}
         residual = response.get("residual") or {}
+        raw_target = response.get("raw_target") or {}
         music_path = self.preferred_audio_path(target)
         sfx_voice_path = self.preferred_audio_path(residual)
         if not music_path:
@@ -1745,6 +1750,20 @@ class PipelineRuntime:
                 metadata={"role": "target", "refs": target, "response": response},
                 created_at=timestamp,
             )
+            # Store raw model output for comparison in the UI.
+            raw_music_path = self.preferred_audio_path(raw_target)
+            if raw_music_path:
+                self._insert_artifact(
+                    conn,
+                    job_id=task["job_id"],
+                    chunk_id=task["chunk_id"],
+                    task_id=task["id"],
+                    kind=ARTIFACT_MUSIC_TRACK_RAW,
+                    path=raw_music_path,
+                    prompt=f"{prompt} (raw model)",
+                    metadata={"role": "raw_target", "refs": raw_target},
+                    created_at=timestamp,
+                )
             sfx_voice_artifact_id = self._insert_artifact(
                 conn,
                 job_id=task["job_id"],
@@ -1804,6 +1823,7 @@ class PipelineRuntime:
         timestamp = now_iso()
         target = response.get("target") or {}
         residual = response.get("residual") or {}
+        raw_target = response.get("raw_target") or {}
         voice_path = self.preferred_audio_path(target)
         sfx_path = self.preferred_audio_path(residual)
         if not voice_path:
@@ -1830,6 +1850,20 @@ class PipelineRuntime:
                 },
                 created_at=timestamp,
             )
+            # Store raw model output for comparison.
+            raw_voice_path = self.preferred_audio_path(raw_target)
+            if raw_voice_path:
+                self._insert_artifact(
+                    conn,
+                    job_id=task["job_id"],
+                    chunk_id=task["chunk_id"],
+                    task_id=task["id"],
+                    kind=ARTIFACT_VOICE_TRACK_RAW,
+                    path=raw_voice_path,
+                    prompt=f"{prompt} (raw model)",
+                    metadata={"role": "raw_target", "refs": raw_target},
+                    created_at=timestamp,
+                )
             sfx_artifact_id = self._insert_artifact(
                 conn,
                 job_id=task["job_id"],
@@ -2665,9 +2699,11 @@ class PipelineRuntime:
             if label:
                 return label
         return {
-            ARTIFACT_MUSIC_TRACK: "music",
+            ARTIFACT_MUSIC_TRACK: "music (STFT masked)",
+            ARTIFACT_MUSIC_TRACK_RAW: "music (raw model)",
             ARTIFACT_SFX_VOICE_TRACK: "sfx+voice",
-            ARTIFACT_VOICE_TRACK: "voice",
+            ARTIFACT_VOICE_TRACK: "voice (STFT masked)",
+            ARTIFACT_VOICE_TRACK_RAW: "voice (raw model)",
             ARTIFACT_SFX_TRACK: "sfx",
             ARTIFACT_SFX_ISOLATED_TRACK: str(artifact.get("prompt") or "isolated sfx").strip() or "isolated sfx",
             ARTIFACT_SFX_REMAINING_TRACK: "remaining sfx",
@@ -2753,8 +2789,10 @@ class PipelineRuntime:
             return (0, 0, lane["id"])
         order = {
             ARTIFACT_MUSIC_TRACK: 10,
+            ARTIFACT_MUSIC_TRACK_RAW: 11,
             ARTIFACT_SFX_VOICE_TRACK: 20,
             ARTIFACT_VOICE_TRACK: 30,
+            ARTIFACT_VOICE_TRACK_RAW: 31,
             ARTIFACT_SFX_TRACK: 40,
             ARTIFACT_SFX_ISOLATED_TRACK: 50,
             ARTIFACT_SFX_REMAINING_TRACK: 51,
