@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import wave
 from pathlib import Path
@@ -21,7 +22,7 @@ def write_tone(path: Path, *, seconds: float = 1.0, sample_rate: int = 16_000, a
             wav.writeframesraw(value.to_bytes(2, "little", signed=True))
 
 
-def make_app(tmp_path: Path, *, backend: str = "mock") -> tuple[TestClient, object]:
+def make_app(tmp_path: Path, *, backend: str = "mock", **config_overrides) -> tuple[TestClient, object]:
     workspace_dir = tmp_path / "workspace"
     output_dir = tmp_path / "outputs"
     config = PipelineConfig(
@@ -33,10 +34,21 @@ def make_app(tmp_path: Path, *, backend: str = "mock") -> tuple[TestClient, obje
         chunk_ms=1_000,
         overlap_ms=200,
         afnext_endpoint="http://127.0.0.1:9/v1/audio-flamingo/ask",
+        **config_overrides,
     )
     workspace_dir.mkdir(parents=True)
     app = create_app(config)
     return TestClient(app), app.state.pipeline_runtime
+
+
+def create_processed_mock_job(client: TestClient, runtime: object, tmp_path: Path) -> dict:
+    audio_path = tmp_path / "workspace" / "tone.wav"
+    write_tone(audio_path, seconds=1.0)
+    response = client.post("/api/jobs", json={"audio_path": str(audio_path)})
+    assert response.status_code == 200
+    job_id = response.json()["job"]["id"]
+    assert runtime.process_until_idle(max_tasks=100) >= 34
+    return client.get(f"/api/jobs/{job_id}").json()
 
 
 def test_dashboard_summary_initializes_schema(tmp_path: Path) -> None:
@@ -90,6 +102,113 @@ def test_dashboard_graph_collapses_empty_paths_into_one_skipped_block(tmp_path: 
     assert "voice transcription" in html
     assert "list sound" in html
     assert "remaining sfx" in html
+
+
+def test_sounds_endpoint_returns_empty_rows_for_empty_database(tmp_path: Path) -> None:
+    client, _ = make_app(tmp_path)
+
+    with client:
+        response = client.get("/api/sounds")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total"] == 0
+    assert data["rows"] == []
+
+
+def test_sounds_endpoint_lists_chunks_with_whole_chunk_audio(tmp_path: Path) -> None:
+    client, runtime = make_app(tmp_path)
+
+    with client:
+        detail = create_processed_mock_job(client, runtime, tmp_path)
+        response = client.get("/api/sounds")
+
+    assert response.status_code == 200
+    data = response.json()
+    rows = data["rows"]
+    assert rows
+    assert data["total"] == len(detail["chunks"])
+    assert len(rows) == len(detail["chunks"])
+    row = rows[0]
+    chunk = detail["chunks"][0]
+    assert row["artifact_id"] is None
+    assert row["kind"] == "source_chunk"
+    assert row["stage"] == chunk["stage"]
+    assert row["chunk_id"] == chunk["id"]
+    assert row["chunk_index"] == chunk["chunk_index"]
+    assert row["sound"] == f"chunk {chunk['chunk_index']}"
+    assert row["start_ms"] == chunk["start_ms"]
+    assert row["end_ms"] == chunk["end_ms"]
+    assert row["audio"]["path"] == chunk["audio_path"]
+    assert row["audio"]["url"].startswith("/files/")
+    assert row["audio"]["format"] == "wav"
+
+
+def test_sounds_endpoint_returns_one_row_per_chunk_not_one_row_per_stem(tmp_path: Path) -> None:
+    client, runtime = make_app(tmp_path)
+
+    with client:
+        detail = create_processed_mock_job(client, runtime, tmp_path)
+        response = client.get("/api/sounds")
+
+    assert response.status_code == 200
+    rows = response.json()["rows"]
+    assert len(rows) == len(detail["chunks"])
+    assert len(detail["artifacts"]) > len(rows)
+    assert {row["kind"] for row in rows} == {"source_chunk"}
+
+
+def test_chunk_waveforms_returns_full_chain_lanes(tmp_path: Path) -> None:
+    client, runtime = make_app(tmp_path)
+
+    with client:
+        detail = create_processed_mock_job(client, runtime, tmp_path)
+        chunk_id = detail["chunks"][0]["id"]
+        response = client.get(f"/api/chunks/{chunk_id}/waveforms")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["chunk"]["id"] == chunk_id
+    lanes = data["lanes"]
+    assert lanes[0]["kind"] == "source_chunk"
+    assert lanes[0]["waveform"]["peaks"]
+    assert len(lanes[0]["waveform"]["peaks"]) <= 600
+    kinds = {lane["kind"] for lane in lanes}
+    assert {"music_track", "sfx_voice_track", "voice_track", "sfx_track", "sfx_isolated_track", "sfx_remaining_track"}.issubset(kinds)
+    assert all(max(lane["waveform"]["peaks"]) <= 1.0 for lane in lanes if lane["waveform"])
+
+
+def test_chunk_waveforms_missing_chunk_returns_404(tmp_path: Path) -> None:
+    client, _ = make_app(tmp_path)
+
+    with client:
+        response = client.get("/api/chunks/not-a-chunk/waveforms")
+
+    assert response.status_code == 404
+
+
+def test_chunk_waveforms_marks_non_local_audio_unavailable(tmp_path: Path) -> None:
+    client, runtime = make_app(tmp_path)
+
+    with client:
+        detail = create_processed_mock_job(client, runtime, tmp_path)
+        music = next(artifact for artifact in detail["artifacts"] if artifact["kind"] == "music_track")
+        with runtime.connect() as conn:
+            conn.execute(
+                "UPDATE artifacts SET path = NULL, metadata_json = ? WHERE id = ?",
+                (
+                    json.dumps({"storage": {"backend": "s3", "path": "s3://bucket/music.mp3", "url": "https://cdn.example/music.mp3"}}),
+                    music["id"],
+                ),
+            )
+
+        response = client.get(f"/api/chunks/{music['chunk_id']}/waveforms")
+
+    assert response.status_code == 200
+    lane = next(lane for lane in response.json()["lanes"] if lane["id"] == music["id"])
+    assert lane["audio"]["backend"] == "s3"
+    assert lane["waveform"] is None
+    assert lane["waveform_unavailable"] == "no local audio path"
 
 
 def test_mock_pipeline_e2e_creates_scene_and_music_split_outputs(tmp_path: Path) -> None:
@@ -548,6 +667,173 @@ def test_failed_task_can_be_retried(tmp_path: Path) -> None:
     retried = [task for task in detail["tasks"] if task["id"] == failed_id][0]
     assert retried["status"] == "pending"
     assert detail["job"]["status"] == "queued"
+
+
+def test_claim_next_tasks_filters_by_queue_and_limit(tmp_path: Path) -> None:
+    client, runtime = make_app(tmp_path)
+    audio_path = tmp_path / "workspace" / "tone.wav"
+    write_tone(audio_path, seconds=1.2)
+
+    with client:
+        response = client.post("/api/jobs", json={"audio_path": str(audio_path)})
+        assert response.status_code == 200
+        chunk_count = response.json()["job"]["chunk_count"]
+        assert chunk_count >= 2
+
+        assert runtime.claim_next_tasks("sam_audio", limit=10) == []
+
+        flamingo = runtime.claim_next_tasks("audio_flamingo", limit=10)
+        assert len(flamingo) == 1
+        assert flamingo[0]["queue"] == "audio_flamingo"
+        assert json.loads(flamingo[0]["payload_json"])["purpose"] == "describe_scene"
+
+        first_gate = runtime.claim_next_tasks("sound_gate", limit=1)
+        assert len(first_gate) == 1
+
+        remaining_gates = runtime.claim_next_tasks("sound_gate", limit=10)
+        assert len(remaining_gates) == chunk_count - 1
+        assert all(task["queue"] == "sound_gate" for task in remaining_gates)
+        assert all(task["status"] == "running" for task in remaining_gates)
+
+        assert runtime.claim_next_tasks("sound_gate", limit=10) == []
+
+
+def test_sam_audio_batch_completes_multiple_tasks_in_one_round(tmp_path: Path) -> None:
+    client, runtime = make_app(tmp_path, sam_batch_size=4)
+    audio_path = tmp_path / "workspace" / "tone.wav"
+    write_tone(audio_path, seconds=1.2)
+
+    with client:
+        response = client.post("/api/jobs", json={"audio_path": str(audio_path)})
+        assert response.status_code == 200
+        job_id = response.json()["job"]["id"]
+        chunk_count = response.json()["job"]["chunk_count"]
+        assert chunk_count >= 2
+
+        while runtime.process_pending_once("sound_gate"):
+            pass
+
+        assert runtime.process_pending_once("sam_audio") is True
+        detail = client.get(f"/api/jobs/{job_id}").json()
+
+    sam_tasks = [task for task in detail["tasks"] if task["queue"] == "sam_audio"]
+    completed = [task for task in sam_tasks if task["status"] == "completed"]
+    assert len(completed) == chunk_count
+    assert all(task["payload"]["purpose"] == "separate_music" for task in completed)
+    gate_tasks = [
+        task
+        for task in detail["tasks"]
+        if task["queue"] == "sound_gate" and task["payload"].get("purpose") in {"gate_music", "gate_sfx_voice"}
+    ]
+    assert len(gate_tasks) == chunk_count * 2
+
+
+def test_sam_audio_batch_endpoint_per_item_error_fails_only_that_task(tmp_path: Path, monkeypatch) -> None:
+    client, runtime = make_app(tmp_path, backend="real", sam_batch_size=4)
+    audio_path = tmp_path / "workspace" / "tone.wav"
+    write_tone(audio_path, seconds=1.2)
+
+    with client:
+        response = client.post("/api/jobs", json={"audio_path": str(audio_path)})
+        assert response.status_code == 200
+        job_id = response.json()["job"]["id"]
+        chunk_count = response.json()["job"]["chunk_count"]
+        assert chunk_count >= 2
+
+        while runtime.process_pending_once("sound_gate"):
+            pass
+
+        calls = []
+
+        def fake_post_json(url: str, payload: dict, *, timeout: float) -> dict:
+            calls.append(url)
+            assert url.endswith("/separate_batch")
+            results = []
+            for index, item in enumerate(payload["items"]):
+                if index == 0:
+                    mock_response = runtime.mock_sam_audio(
+                        Path(item["audio_path"]), item["prompt"], item["output_prefix"], job_id
+                    )
+                    results.append({"result": mock_response})
+                else:
+                    results.append({"error": "boom"})
+            return {"results": results}
+
+        monkeypatch.setattr("services.pipeline_app.post_json", fake_post_json)
+
+        assert runtime.process_pending_once("sam_audio") is True
+        detail = client.get(f"/api/jobs/{job_id}").json()
+
+    assert len(calls) == 1
+    sam_tasks = [task for task in detail["tasks"] if task["queue"] == "sam_audio"]
+    assert len([task for task in sam_tasks if task["status"] == "completed"]) == 1
+    failed = [task for task in sam_tasks if task["status"] == "failed"]
+    assert len(failed) == chunk_count - 1
+    assert all("boom" in task["error"] for task in failed)
+
+
+def test_audio_flamingo_batch_uses_batch_endpoint(tmp_path: Path, monkeypatch) -> None:
+    client, runtime = make_app(tmp_path, backend="real", afnext_batch_size=4)
+    first_audio = tmp_path / "workspace" / "tone_a.wav"
+    second_audio = tmp_path / "workspace" / "tone_b.wav"
+    write_tone(first_audio, seconds=1.0)
+    write_tone(second_audio, seconds=1.0)
+
+    with client:
+        first_job = client.post("/api/jobs", json={"audio_path": str(first_audio)}).json()["job"]["id"]
+        second_job = client.post("/api/jobs", json={"audio_path": str(second_audio)}).json()["job"]["id"]
+
+        calls = []
+
+        def fake_post_json(url: str, payload: dict, *, timeout: float) -> dict:
+            calls.append(url)
+            assert url.endswith("/ask_batch")
+            assert payload["max_new_tokens"] == 256
+            return {"results": [{"result": {"text": f"scene {index}"}} for index, _ in enumerate(payload["items"])]}
+
+        monkeypatch.setattr("services.pipeline_app.post_json", fake_post_json)
+
+        assert runtime.process_pending_once("audio_flamingo") is True
+
+        first_detail = client.get(f"/api/jobs/{first_job}").json()
+        second_detail = client.get(f"/api/jobs/{second_job}").json()
+
+    assert len(calls) == 1
+    for detail, expected_text in ((first_detail, "scene 0"), (second_detail, "scene 1")):
+        scene_tasks = [task for task in detail["tasks"] if task["payload"].get("purpose") == "describe_scene"]
+        assert len(scene_tasks) == 1
+        assert scene_tasks[0]["status"] == "completed"
+        scene_artifacts = [artifact for artifact in detail["artifacts"] if artifact["kind"] == "scene_description"]
+        assert len(scene_artifacts) == 1
+        assert scene_artifacts[0]["text"] == expected_text
+
+
+def test_start_worker_spawns_one_thread_per_queue(tmp_path: Path) -> None:
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir(parents=True)
+    config = PipelineConfig(
+        workspace_dir=workspace_dir,
+        output_dir=tmp_path / "outputs",
+        db_path=tmp_path / "pipeline.sqlite3",
+        backend="mock",
+        worker_enabled=True,
+        worker_interval_seconds=0.05,
+    )
+    app = create_app(config)
+    runtime = app.state.pipeline_runtime
+    runtime.init_db()
+    runtime.start_worker()
+    try:
+        names = {thread.name for thread in runtime._worker_threads}
+        assert names == {
+            "pipeline-worker-sound_gate",
+            "pipeline-worker-audio_flamingo",
+            "pipeline-worker-sam_audio",
+        }
+        assert all(thread.is_alive() for thread in runtime._worker_threads)
+    finally:
+        runtime.stop_worker()
+    assert all(not thread.is_alive() for thread in runtime._worker_threads)
 
 
 def test_s3_storage_adapter_uploads_artifact_and_returns_s3_ref(tmp_path: Path) -> None:

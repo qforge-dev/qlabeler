@@ -22,12 +22,18 @@ patch_torch_float8_symbols_for_transformers()
 
 from transformers import AutoConfig, AutoModel, AutoModelForSeq2SeqLM, AutoProcessor
 
+try:
+    from transformers import AutoModelForMultimodalLM
+except ImportError:  # pragma: no cover - depends on installed transformers version.
+    AutoModelForMultimodalLM = None
+
 from services.common import exception_detail, parse_bool, resolve_local_path
 
 
 MODEL_ID = os.environ.get("AFNEXT_MODEL_ID", "nvidia/audio-flamingo-next-think-hf")
 DEFAULT_MAX_NEW_TOKENS = int(os.environ.get("AFNEXT_MAX_NEW_TOKENS", "1024"))
 DEFAULT_REPETITION_PENALTY = float(os.environ.get("AFNEXT_REPETITION_PENALTY", "1.2"))
+MAX_BATCH = max(1, int(os.environ.get("AFNEXT_MAX_BATCH", "4")))
 
 app = FastAPI(
     title="Audio Flamingo Next API",
@@ -65,6 +71,44 @@ class AskResponse(BaseModel):
     audio_path: str
     prompt: str
     text: str
+
+
+class AskBatchItem(BaseModel):
+    audio_path: str | None = Field(default=None, description="Local path or file:// URL to an audio file.")
+    file_path: str | None = Field(default=None, description="Alias for audio_path.")
+    file: str | None = Field(default=None, description="Alias for audio_path.")
+    audio_url: str | None = Field(default=None, description="Alias for audio_path; only file:// URLs are supported.")
+    prompt: str | None = Field(default=None, description="Question or instruction for the model.")
+    input: str | None = Field(default=None, description="Alias for prompt.")
+    question: str | None = Field(default=None, description="Alias for prompt.")
+
+    def audio_ref(self) -> str:
+        value = self.audio_path or self.file_path or self.file or self.audio_url
+        if not value:
+            raise ValueError("Provide audio_path, file_path, file, or audio_url.")
+        return value
+
+    def prompt_text(self) -> str:
+        value = self.prompt or self.input or self.question
+        if not value or not value.strip():
+            raise ValueError("Provide prompt, input, or question.")
+        return value.strip()
+
+
+class AskBatchRequest(BaseModel):
+    items: list[AskBatchItem] = Field(min_length=1)
+    max_new_tokens: int = Field(default=DEFAULT_MAX_NEW_TOKENS, ge=1, le=8192)
+    repetition_penalty: float = Field(default=DEFAULT_REPETITION_PENALTY, ge=0.1, le=10.0)
+
+
+class AskBatchEntry(BaseModel):
+    error: str | None = None
+    result: AskResponse | None = None
+
+
+class AskBatchResponse(BaseModel):
+    model_id: str
+    results: list[AskBatchEntry]
 
 
 class _ModelState:
@@ -117,16 +161,21 @@ def load_model() -> _ModelState:
         elif runtime == "mps":
             model_kwargs["device_map"] = {"": "mps"}
 
-        try:
-            auto_model_cls = AutoModel._model_mapping[type(config)]
-            auto_model_cls_name = auto_model_cls.__name__
-        except Exception:
-            auto_model_cls_name = ""
-
-        if str(auto_model_cls_name).endswith("ForConditionalGeneration"):
-            model = AutoModel.from_pretrained(MODEL_ID, **model_kwargs).eval()
-        else:
+        if getattr(config, "model_type", "") == "musicflamingo":
             model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_ID, **model_kwargs).eval()
+        elif AutoModelForMultimodalLM is not None:
+            model = AutoModelForMultimodalLM.from_pretrained(MODEL_ID, **model_kwargs).eval()
+        else:
+            try:
+                auto_model_cls = AutoModel._model_mapping[type(config)]
+                auto_model_cls_name = auto_model_cls.__name__
+            except Exception:
+                auto_model_cls_name = ""
+
+            if str(auto_model_cls_name).endswith("ForConditionalGeneration"):
+                model = AutoModel.from_pretrained(MODEL_ID, **model_kwargs).eval()
+            else:
+                model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_ID, **model_kwargs).eval()
 
         _state.processor = processor
         _state.model = model
@@ -183,6 +232,69 @@ def ask_audio(audio_path: str, prompt: str, *, max_new_tokens: int, repetition_p
         skip_special_tokens=True,
         clean_up_tokenization_spaces=False,
     )[0].strip()
+
+
+def ask_audio_batch(items: list[tuple[str, str]], *, max_new_tokens: int, repetition_penalty: float) -> list[str]:
+    state = load_model()
+    assert state.processor is not None
+    assert state.model is not None
+    assert state.model_device is not None
+    assert state.model_dtype is not None
+
+    conversations = [
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "audio", "path": audio_path},
+                ],
+            }
+        ]
+        for audio_path, prompt in items
+    ]
+
+    tokenizer = getattr(state.processor, "tokenizer", None)
+    use_cuda_amp = state.model_device.type == "cuda" and state.model_dtype in {torch.float16, torch.bfloat16}
+    amp_context = torch.autocast("cuda", dtype=state.model_dtype) if use_cuda_amp else nullcontext()
+
+    # The lock also guards the temporary padding_side mutation on the shared tokenizer.
+    with _inference_lock:
+        previous_side = getattr(tokenizer, "padding_side", None) if tokenizer is not None else None
+        if tokenizer is not None and len(items) > 1:
+            # Left padding keeps `generated[:, prompt_len:]` aligned for every row.
+            tokenizer.padding_side = "left"
+        try:
+            batch = state.processor.apply_chat_template(
+                conversations,
+                tokenize=True,
+                add_generation_prompt=True,
+                return_dict=True,
+                padding=len(items) > 1,
+            )
+        finally:
+            if tokenizer is not None and previous_side is not None:
+                tokenizer.padding_side = previous_side
+
+        batch = batch.to(state.model_device)
+        if "input_features" in batch:
+            batch["input_features"] = batch["input_features"].to(state.model_dtype)
+
+        with torch.inference_mode(), amp_context:
+            generated = state.model.generate(
+                **batch,
+                max_new_tokens=int(max_new_tokens),
+                repetition_penalty=float(repetition_penalty),
+            )
+
+    prompt_len = batch["input_ids"].shape[1]
+    completion = generated[:, prompt_len:] if generated.shape[1] > prompt_len else generated
+    texts = state.processor.batch_decode(
+        completion,
+        skip_special_tokens=True,
+        clean_up_tokenization_spaces=False,
+    )
+    return [text.strip() for text in texts]
 
 
 @app.on_event("startup")
@@ -242,3 +354,43 @@ def ask(request: AskRequest) -> AskResponse:
         raise HTTPException(status_code=503, detail=exception_detail(exc)) from exc
 
     return AskResponse(model_id=MODEL_ID, audio_path=str(audio_path), prompt=prompt, text=text)
+
+
+@app.post("/v1/audio-flamingo/ask_batch", response_model=AskBatchResponse)
+@app.post("/ask_batch", response_model=AskBatchResponse)
+def ask_batch(request: AskBatchRequest) -> AskBatchResponse:
+    entries: list[AskBatchEntry | None] = [None] * len(request.items)
+    valid: list[tuple[int, str, str]] = []
+    for index, item in enumerate(request.items):
+        try:
+            audio_path = resolve_local_path(item.audio_ref())
+            prompt = item.prompt_text()
+            valid.append((index, str(audio_path), prompt))
+        except Exception as exc:
+            entries[index] = AskBatchEntry(error=exception_detail(exc))
+
+    for start in range(0, len(valid), MAX_BATCH):
+        group = valid[start : start + MAX_BATCH]
+        try:
+            texts = ask_audio_batch(
+                [(audio_path, prompt) for _, audio_path, prompt in group],
+                max_new_tokens=request.max_new_tokens,
+                repetition_penalty=request.repetition_penalty,
+            )
+            if len(texts) != len(group):
+                raise RuntimeError(f"Model returned {len(texts)} outputs for {len(group)} inputs.")
+        except Exception as exc:
+            error = exception_detail(exc)
+            for index, _, _ in group:
+                entries[index] = AskBatchEntry(error=error)
+            continue
+
+        for (index, audio_path, prompt), text in zip(group, texts):
+            entries[index] = AskBatchEntry(
+                result=AskResponse(model_id=MODEL_ID, audio_path=audio_path, prompt=prompt, text=text)
+            )
+
+    return AskBatchResponse(
+        model_id=MODEL_ID,
+        results=[entry if entry is not None else AskBatchEntry(error="Item was not processed.") for entry in entries],
+    )

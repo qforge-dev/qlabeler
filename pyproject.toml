@@ -1,0 +1,15 @@
+[project]
+name = "project"
+version = "0.0.0"
+requires-python = "==3.13.*"
+dependencies = [
+    "sam_audio @ git+https://github.com/facebookresearch/sam-audio.git",
+    "torch",
+    "torchaudio",
+    "torchcodec>=0.2,<0.3",
+    "transformers>=4.54,<5",
+    "huggingface_hub>=0.34,<1.0",
+    "hf_transfer",
+    "pydub",
+    "audioop-lts",
+]

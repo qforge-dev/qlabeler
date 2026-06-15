@@ -23,6 +23,8 @@ WORKSPACE_DIR="${WORKSPACE_DIR:-$DEFAULT_WORKSPACE_DIR}"
 OUTPUT_DIR="${OUTPUT_DIR:-$WORKSPACE_DIR/outputs}"
 VENV_DIR="${VENV_DIR:-$WORKSPACE_DIR/venvs}"
 LOG_DIR="${LOG_DIR:-$WORKSPACE_DIR/logs/qlabeler}"
+HF_CACHE_DIR="${HF_CACHE_DIR:-${HF_HOME:-$WORKSPACE_DIR/.cache/huggingface}}"
+PYTHON_BIN="${PYTHON_BIN:-python3.11}"
 
 AFNEXT_PORT="${AFNEXT_PORT:-8001}"
 SAM_AUDIO_PORT="${SAM_AUDIO_PORT:-8002}"
@@ -74,6 +76,8 @@ Environment:
   VENV_DIR=$VENV_DIR
   OUTPUT_DIR=$OUTPUT_DIR
   LOG_DIR=$LOG_DIR
+  HF_CACHE_DIR=$HF_CACHE_DIR
+  PYTHON_BIN=$PYTHON_BIN
   AFNEXT_PORT=$AFNEXT_PORT
   SAM_AUDIO_PORT=$SAM_AUDIO_PORT
   PIPELINE_PORT=$PIPELINE_PORT
@@ -82,7 +86,7 @@ Environment:
   PYTORCH_INDEX_URL=$PYTORCH_INDEX_URL
   LOAD_MODELS=$LOAD_MODELS
 
-Put HF_TOKEN in $ROOT_DIR/.env or export it before running this script.
+  Put HF_TOKEN in $ROOT_DIR/.env or export it before running this script.
 EOF
 }
 
@@ -119,16 +123,28 @@ install_base_packages() {
     jq \
     libsndfile1 \
     procps \
+    software-properties-common \
     python3 \
     python3-pip \
     python3-venv \
     unzip
+
+  if [[ "$PYTHON_BIN" == "python3.11" ]] && ! command -v python3.11 >/dev/null 2>&1; then
+    if ! apt-cache show python3.11-venv >/dev/null 2>&1; then
+      add-apt-repository -y ppa:deadsnakes/ppa
+      apt-get update
+    fi
+  fi
+
+  if [[ "$PYTHON_BIN" == "python3.11" ]]; then
+    apt-get install -y python3.11 python3.11-dev python3.11-venv
+  fi
 }
 
 create_venv() {
   local path="$1"
   if [[ ! -x "$path/bin/python" ]]; then
-    python3 -m venv "$path"
+    "$PYTHON_BIN" -m venv "$path"
   fi
   "$path/bin/python" -m pip install --upgrade pip wheel "setuptools<81"
 }
@@ -154,6 +170,17 @@ PY
     torch \
     torchaudio \
     --index-url "$PYTORCH_INDEX_URL"
+}
+
+install_audioop_lts_if_needed() {
+  local venv="$1"
+  if "$venv/bin/python" - <<'PY' >/dev/null 2>&1
+import sys
+raise SystemExit(0 if sys.version_info >= (3, 13) else 1)
+PY
+  then
+    "$venv/bin/python" -m pip install --upgrade audioop-lts
+  fi
 }
 
 patch_sam_audio_audio_loader() {
@@ -218,11 +245,12 @@ install_audio_flamingo_env() {
     fastapi \
     hf_transfer \
     librosa \
-    audioop-lts \
     pydub \
+    safetensors \
     soundfile \
     transformers \
     "uvicorn[standard]"
+  install_audioop_lts_if_needed "$AFNEXT_VENV"
 }
 
 install_sam_audio_env() {
@@ -237,15 +265,16 @@ install_sam_audio_env() {
   "$SAM_AUDIO_VENV/bin/python" -m pip install --force-reinstall --no-deps \
     --index-url "$PYTORCH_INDEX_URL" \
     "torchcodec>=0.2,<0.3"
+  "$SAM_AUDIO_VENV/bin/python" -m pip install --upgrade "nvidia-npp-cu12"
   patch_sam_audio_audio_loader "$SAM_AUDIO_VENV"
   "$SAM_AUDIO_VENV/bin/python" -m pip install --upgrade --no-warn-conflicts \
     fastapi \
     "transformers>=4.54,<5" \
     "huggingface_hub>=0.34,<1.0" \
     hf_transfer \
-    audioop-lts \
     pydub \
     "uvicorn[standard]"
+  install_audioop_lts_if_needed "$SAM_AUDIO_VENV"
 }
 
 install_pipeline_env() {
@@ -253,11 +282,11 @@ install_pipeline_env() {
   create_venv "$PIPELINE_VENV"
   "$PIPELINE_VENV/bin/python" -m pip install --upgrade \
     fastapi \
-    audioop-lts \
     boto3 \
     pydub \
     python-multipart \
     "uvicorn[standard]"
+  install_audioop_lts_if_needed "$PIPELINE_VENV"
 }
 
 install_all() {
@@ -345,7 +374,7 @@ start_service() {
   fi
 
   log "Starting $name on port $port"
-  mkdir -p "$LOG_DIR" "$OUTPUT_DIR"
+  mkdir -p "$LOG_DIR" "$OUTPUT_DIR" "$HF_CACHE_DIR"
   local cuda_lib_path=""
   local runtime_library_path="${LD_LIBRARY_PATH:-}"
   cuda_lib_path="$(find "$venv/lib" -path '*/site-packages/nvidia/*/lib' -type d 2>/dev/null | paste -sd: - || true)"
@@ -360,7 +389,8 @@ start_service() {
     nohup env \
       LD_LIBRARY_PATH="$runtime_library_path" \
       PYTHONPATH="$ROOT_DIR" \
-      HF_HOME="$WORKSPACE_DIR/.cache/huggingface" \
+      HF_HOME="$HF_CACHE_DIR" \
+      HF_HUB_DISABLE_XET=1 \
       HF_HUB_ENABLE_HF_TRANSFER=1 \
       WORKSPACE_DIR="$WORKSPACE_DIR" \
       OUTPUT_DIR="$OUTPUT_DIR" \
@@ -506,8 +536,8 @@ doctor() {
     "$ROOT_DIR" "$WORKSPACE_DIR" "$VENV_DIR" "$OUTPUT_DIR" "$LOG_DIR" "$PIPELINE_BACKEND" "$PIPELINE_STORAGE_BACKEND"
 
   log "Python"
-  command -v python3 || true
-  python3 --version || true
+  command -v "$PYTHON_BIN" || true
+  "$PYTHON_BIN" --version || true
 
   log "FFmpeg"
   command -v ffmpeg || true

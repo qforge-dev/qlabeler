@@ -17,7 +17,7 @@ from typing import Any
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -136,6 +136,14 @@ ARTIFACT_SFX_ISOLATED_TRACK = "sfx_isolated_track"
 ARTIFACT_SFX_REMAINING_TRACK = "sfx_remaining_track"
 ARTIFACT_SFX_LOOP_DEBUG = "sfx_loop_debug"
 ARTIFACT_SOUND_GATE = "sound_gate"
+SOUND_AUDIO_ARTIFACT_KINDS = (
+    ARTIFACT_MUSIC_TRACK,
+    ARTIFACT_SFX_VOICE_TRACK,
+    ARTIFACT_VOICE_TRACK,
+    ARTIFACT_SFX_TRACK,
+    ARTIFACT_SFX_ISOLATED_TRACK,
+    ARTIFACT_SFX_REMAINING_TRACK,
+)
 
 STATUS_PENDING = "pending"
 STATUS_RUNNING = "running"
@@ -211,9 +219,13 @@ class PipelineConfig:
     db_path: Path = WORKSPACE_DIR / "pipeline.sqlite3"
     backend: str = "mock"
     afnext_endpoint: str = "http://127.0.0.1:8001/v1/audio-flamingo/ask"
+    afnext_batch_endpoint: str = "http://127.0.0.1:8001/v1/audio-flamingo/ask_batch"
     sam_audio_endpoint: str = "http://127.0.0.1:8002/v1/sam-audio/separate"
+    sam_audio_batch_endpoint: str = "http://127.0.0.1:8002/v1/sam-audio/separate_batch"
     worker_enabled: bool = True
     worker_interval_seconds: float = 1.0
+    sam_batch_size: int = 4
+    afnext_batch_size: int = 1
     chunk_ms: int = 30_000
     overlap_ms: int = 5_000
     sound_gate_min_dbfs: float = -50.0
@@ -243,9 +255,13 @@ class PipelineConfig:
             db_path=db_path,
             backend=backend,
             afnext_endpoint=os.environ.get("AFNEXT_ENDPOINT", "http://127.0.0.1:8001/v1/audio-flamingo/ask"),
+            afnext_batch_endpoint=os.environ.get("AFNEXT_BATCH_ENDPOINT", "http://127.0.0.1:8001/v1/audio-flamingo/ask_batch"),
             sam_audio_endpoint=os.environ.get("SAM_AUDIO_ENDPOINT", "http://127.0.0.1:8002/v1/sam-audio/separate"),
+            sam_audio_batch_endpoint=os.environ.get("SAM_AUDIO_BATCH_ENDPOINT", "http://127.0.0.1:8002/v1/sam-audio/separate_batch"),
             worker_enabled=parse_bool(os.environ.get("PIPELINE_WORKER_ENABLED"), default=True),
             worker_interval_seconds=float(os.environ.get("PIPELINE_WORKER_INTERVAL_SECONDS", "1.0")),
+            sam_batch_size=max(1, int(os.environ.get("PIPELINE_SAM_BATCH_SIZE", "4"))),
+            afnext_batch_size=max(1, int(os.environ.get("PIPELINE_AFNEXT_BATCH_SIZE", "1"))),
             chunk_ms=int(os.environ.get("PIPELINE_CHUNK_SECONDS", "30")) * 1000,
             overlap_ms=int(os.environ.get("PIPELINE_OVERLAP_SECONDS", "5")) * 1000,
             sound_gate_min_dbfs=float(os.environ.get("PIPELINE_SOUND_GATE_MIN_DBFS", "-50")),
@@ -310,7 +326,8 @@ class PipelineRuntime:
             s3_presign_seconds=config.s3_presign_seconds,
         )
         self._audio_duration_cache: dict[str, float] = {}
-        self._worker_thread: threading.Thread | None = None
+        self._audio_duration_cache_lock = threading.Lock()
+        self._worker_threads: list[threading.Thread] = []
         self._stop_event = threading.Event()
         self._worker_lock = threading.Lock()
 
@@ -474,20 +491,30 @@ class PipelineRuntime:
         if not self.config.worker_enabled:
             return
         with self._worker_lock:
-            if self._worker_thread and self._worker_thread.is_alive():
+            if any(thread.is_alive() for thread in self._worker_threads):
                 return
             self._stop_event.clear()
-            self._worker_thread = threading.Thread(target=self.worker_loop, name="pipeline-worker", daemon=True)
-            self._worker_thread.start()
+            self._worker_threads = [
+                threading.Thread(
+                    target=self.worker_loop,
+                    args=(queue,),
+                    name=f"pipeline-worker-{queue}",
+                    daemon=True,
+                )
+                for queue in TASK_QUEUES
+            ]
+            for thread in self._worker_threads:
+                thread.start()
 
     def stop_worker(self) -> None:
         self._stop_event.set()
-        if self._worker_thread and self._worker_thread.is_alive():
-            self._worker_thread.join(timeout=5)
+        for thread in self._worker_threads:
+            if thread.is_alive():
+                thread.join(timeout=5)
 
-    def worker_loop(self) -> None:
+    def worker_loop(self, queue: str | None = None) -> None:
         while not self._stop_event.is_set():
-            did_work = self.process_pending_once()
+            did_work = self.process_pending_once(queue)
             if not did_work:
                 self._stop_event.wait(self.config.worker_interval_seconds)
 
@@ -727,43 +754,72 @@ class PipelineRuntime:
                 return True
         return False
 
-    def claim_next_task(self) -> dict[str, Any] | None:
+    def claim_next_tasks(self, queue: str | None = None, *, limit: int = 1) -> list[dict[str, Any]]:
         with self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute(
-                """
+            queue_clause = " AND queue = ?" if queue is not None else ""
+            params: list[Any] = [STATUS_PENDING]
+            if queue is not None:
+                params.append(queue)
+            params.append(max(1, int(limit)))
+            rows = conn.execute(
+                f"""
                 SELECT * FROM tasks
-                WHERE status = ?
+                WHERE status = ?{queue_clause}
                 ORDER BY created_at ASC, rowid ASC
-                LIMIT 1
+                LIMIT ?
                 """,
-                (STATUS_PENDING,),
-            ).fetchone()
-            if row is None:
+                params,
+            ).fetchall()
+            if not rows:
                 conn.execute("COMMIT")
-                return None
+                return []
 
             timestamp = now_iso()
-            conn.execute(
-                """
-                UPDATE tasks
-                SET status = ?, attempts = attempts + 1, started_at = ?, updated_at = ?, error = NULL
-                WHERE id = ?
-                """,
-                (STATUS_RUNNING, timestamp, timestamp, row["id"]),
-            )
-            conn.execute(
-                "UPDATE jobs SET status = ?, updated_at = ? WHERE id = ?",
-                ("running", timestamp, row["job_id"]),
-            )
+            claimed: list[dict[str, Any]] = []
+            for row in rows:
+                conn.execute(
+                    """
+                    UPDATE tasks
+                    SET status = ?, attempts = attempts + 1, started_at = ?, updated_at = ?, error = NULL
+                    WHERE id = ?
+                    """,
+                    (STATUS_RUNNING, timestamp, timestamp, row["id"]),
+                )
+                conn.execute(
+                    "UPDATE jobs SET status = ?, updated_at = ? WHERE id = ?",
+                    ("running", timestamp, row["job_id"]),
+                )
+                claimed.append(dict(row) | {"status": STATUS_RUNNING, "attempts": int(row["attempts"]) + 1})
             conn.execute("COMMIT")
-            return dict(row) | {"status": STATUS_RUNNING, "attempts": int(row["attempts"]) + 1}
+            return claimed
 
-    def process_pending_once(self) -> bool:
-        task = self.claim_next_task()
-        if task is None:
+    def claim_next_task(self, queue: str | None = None) -> dict[str, Any] | None:
+        claimed = self.claim_next_tasks(queue, limit=1)
+        return claimed[0] if claimed else None
+
+    def queue_batch_size(self, queue: str | None) -> int:
+        if queue == TASK_SAM_AUDIO:
+            return max(1, self.config.sam_batch_size)
+        if queue == TASK_AUDIO_FLAMINGO:
+            return max(1, self.config.afnext_batch_size)
+        return 1
+
+    def process_pending_once(self, queue: str | None = None) -> bool:
+        tasks = self.claim_next_tasks(queue, limit=self.queue_batch_size(queue))
+        if not tasks:
             return False
 
+        if len(tasks) > 1 and queue == TASK_SAM_AUDIO:
+            self.process_sam_audio_batch(tasks)
+        elif len(tasks) > 1 and queue == TASK_AUDIO_FLAMINGO:
+            self.process_audio_flamingo_batch(tasks)
+        else:
+            for task in tasks:
+                self._process_claimed_task(task)
+        return True
+
+    def _process_claimed_task(self, task: dict[str, Any]) -> None:
         try:
             if task["queue"] == TASK_SOUND_GATE:
                 self.process_sound_gate(task)
@@ -775,7 +831,6 @@ class PipelineRuntime:
                 raise RuntimeError(f"Unknown task queue: {task['queue']}")
         except Exception as exc:
             self.fail_task(task, exception_detail(exc))
-        return True
 
     def process_sound_gate(self, task: dict[str, Any]) -> None:
         payload = json_loads(task["payload_json"], {})
@@ -1026,11 +1081,14 @@ class PipelineRuntime:
             self._update_job_status_conn(conn, task["job_id"], timestamp)
             conn.execute("COMMIT")
 
+    def _audio_flamingo_prompt(self, task: dict[str, Any], payload: dict[str, Any]) -> str:
+        purpose = payload.get("purpose") or PURPOSE_DESCRIBE_SFX
+        return payload.get("prompt") or self.default_prompt_for_audio_flamingo_purpose(purpose, task["job_id"])
+
     def process_audio_flamingo(self, task: dict[str, Any]) -> None:
         payload = json_loads(task["payload_json"], {})
-        purpose = payload.get("purpose") or PURPOSE_DESCRIBE_SFX
         audio_path = Path(payload["audio_path"])
-        prompt = payload.get("prompt") or self.default_prompt_for_audio_flamingo_purpose(purpose, task["job_id"])
+        prompt = self._audio_flamingo_prompt(task, payload)
         if self.config.backend == "mock":
             response = self.mock_audio_flamingo(audio_path, prompt)
         else:
@@ -1044,7 +1102,76 @@ class PipelineRuntime:
                 },
                 timeout=self.config.request_timeout_seconds,
             )
+        self._complete_audio_flamingo_task(task, payload, response)
 
+    def process_audio_flamingo_batch(self, tasks: list[dict[str, Any]]) -> None:
+        prepared: list[tuple[dict[str, Any], dict[str, Any], str, str]] = []
+        for task in tasks:
+            try:
+                payload = json_loads(task["payload_json"], {})
+                audio_path = str(Path(payload["audio_path"]))
+                prompt = self._audio_flamingo_prompt(task, payload)
+                prepared.append((task, payload, audio_path, prompt))
+            except Exception as exc:
+                self.fail_task(task, exception_detail(exc))
+        if not prepared:
+            return
+
+        if self.config.backend == "mock":
+            for task, payload, audio_path, prompt in prepared:
+                try:
+                    response = self.mock_audio_flamingo(Path(audio_path), prompt)
+                    self._complete_audio_flamingo_task(task, payload, response)
+                except Exception as exc:
+                    self.fail_task(task, exception_detail(exc))
+            return
+
+        try:
+            batch_response = post_json(
+                self.config.afnext_batch_endpoint,
+                {
+                    "items": [
+                        {"audio_path": audio_path, "prompt": prompt}
+                        for _, _, audio_path, prompt in prepared
+                    ],
+                    "max_new_tokens": 256,
+                    "repetition_penalty": 1.2,
+                },
+                timeout=self.config.request_timeout_seconds,
+            )
+            results = batch_response.get("results")
+            if not isinstance(results, list) or len(results) != len(prepared):
+                raise RuntimeError(
+                    f"Audio Flamingo batch endpoint returned {len(results) if isinstance(results, list) else 'no'} "
+                    f"results for {len(prepared)} items"
+                )
+        except Exception as exc:
+            error = exception_detail(exc)
+            for task, _, _, _ in prepared:
+                self.fail_task(task, error)
+            return
+
+        for (task, payload, _, _), entry in zip(prepared, results):
+            try:
+                response = self._unwrap_batch_entry(entry)
+                self._complete_audio_flamingo_task(task, payload, response)
+            except Exception as exc:
+                self.fail_task(task, exception_detail(exc))
+
+    @staticmethod
+    def _unwrap_batch_entry(entry: Any) -> dict[str, Any]:
+        if not isinstance(entry, dict):
+            raise RuntimeError(f"Invalid batch result entry: {entry!r}")
+        if entry.get("error"):
+            raise RuntimeError(str(entry["error"]))
+        result = entry.get("result")
+        if not isinstance(result, dict):
+            raise RuntimeError(f"Batch result entry missing result payload: {entry!r}")
+        return result
+
+    def _complete_audio_flamingo_task(self, task: dict[str, Any], payload: dict[str, Any], response: dict[str, Any]) -> None:
+        purpose = payload.get("purpose") or PURPOSE_DESCRIBE_SFX
+        audio_path = Path(payload["audio_path"])
         text = str(response.get("text", "")).strip()
         if purpose == PURPOSE_DESCRIBE_SCENE:
             self.complete_scene_description(task, text, response)
@@ -1354,30 +1481,99 @@ class PipelineRuntime:
             self._update_job_status_conn(conn, task["job_id"], timestamp)
             conn.execute("COMMIT")
 
-    def process_sam_audio(self, task: dict[str, Any]) -> None:
-        payload = json_loads(task["payload_json"], {})
+    def _sam_audio_request(self, task: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
         purpose = payload.get("purpose") or PURPOSE_SEPARATE_SFX
-        audio_path = Path(payload["audio_path"])
         prompt = payload["prompt"]
         chunk = self.chunk(task["chunk_id"])
         output_prefix = clean_prefix(f"job_{task['job_id']}_chunk_{chunk['chunk_index']:04d}_{purpose}_{prompt}")
+        return {
+            "audio_path": str(Path(payload["audio_path"])),
+            "input": prompt,
+            "output_prefix": output_prefix,
+            "max_audio_seconds": max(35, int((chunk["duration_ms"] + 999) / 1000)),
+            "predict_spans": False,
+            "reranking_candidates": 1,
+        }
+
+    def process_sam_audio(self, task: dict[str, Any]) -> None:
+        payload = json_loads(task["payload_json"], {})
+        request = self._sam_audio_request(task, payload)
 
         if self.config.backend == "mock":
-            response = self.mock_sam_audio(audio_path, prompt, output_prefix, task["job_id"])
+            response = self.mock_sam_audio(
+                Path(request["audio_path"]), request["input"], request["output_prefix"], task["job_id"]
+            )
         else:
             response = post_json(
                 self.config.sam_audio_endpoint,
+                request,
+                timeout=self.config.request_timeout_seconds,
+            )
+        self._complete_sam_audio_task(task, payload, response)
+
+    def process_sam_audio_batch(self, tasks: list[dict[str, Any]]) -> None:
+        prepared: list[tuple[dict[str, Any], dict[str, Any], dict[str, Any]]] = []
+        for task in tasks:
+            try:
+                payload = json_loads(task["payload_json"], {})
+                request = self._sam_audio_request(task, payload)
+                prepared.append((task, payload, request))
+            except Exception as exc:
+                self.fail_task(task, exception_detail(exc))
+        if not prepared:
+            return
+
+        if self.config.backend == "mock":
+            for task, payload, request in prepared:
+                try:
+                    response = self.mock_sam_audio(
+                        Path(request["audio_path"]), request["input"], request["output_prefix"], task["job_id"]
+                    )
+                    self._complete_sam_audio_task(task, payload, response)
+                except Exception as exc:
+                    self.fail_task(task, exception_detail(exc))
+            return
+
+        try:
+            batch_response = post_json(
+                self.config.sam_audio_batch_endpoint,
                 {
-                    "audio_path": str(audio_path),
-                    "input": prompt,
-                    "output_prefix": output_prefix,
-                    "max_audio_seconds": max(35, int((chunk["duration_ms"] + 999) / 1000)),
+                    "items": [
+                        {
+                            "audio_path": request["audio_path"],
+                            "prompt": request["input"],
+                            "output_prefix": request["output_prefix"],
+                            "max_audio_seconds": request["max_audio_seconds"],
+                        }
+                        for _, _, request in prepared
+                    ],
                     "predict_spans": False,
                     "reranking_candidates": 1,
                 },
                 timeout=self.config.request_timeout_seconds,
             )
+            results = batch_response.get("results")
+            if not isinstance(results, list) or len(results) != len(prepared):
+                raise RuntimeError(
+                    f"SAM-Audio batch endpoint returned {len(results) if isinstance(results, list) else 'no'} "
+                    f"results for {len(prepared)} items"
+                )
+        except Exception as exc:
+            error = exception_detail(exc)
+            for task, _, _ in prepared:
+                self.fail_task(task, error)
+            return
 
+        for (task, payload, _), entry in zip(prepared, results):
+            try:
+                response = self._unwrap_batch_entry(entry)
+                self._complete_sam_audio_task(task, payload, response)
+            except Exception as exc:
+                self.fail_task(task, exception_detail(exc))
+
+    def _complete_sam_audio_task(self, task: dict[str, Any], payload: dict[str, Any], response: dict[str, Any]) -> None:
+        purpose = payload.get("purpose") or PURPOSE_SEPARATE_SFX
+        prompt = payload["prompt"]
         if purpose == PURPOSE_SEPARATE_MUSIC:
             self.complete_music_separation(task, prompt, response)
             return
@@ -1866,8 +2062,9 @@ class PipelineRuntime:
             resolved = str(Path(audio_path).expanduser().resolve())
         except Exception:
             return None
-        if resolved in self._audio_duration_cache:
-            return self._audio_duration_cache[resolved]
+        with self._audio_duration_cache_lock:
+            if resolved in self._audio_duration_cache:
+                return self._audio_duration_cache[resolved]
         path = Path(resolved)
         if not path.is_file():
             return None
@@ -1875,7 +2072,8 @@ class PipelineRuntime:
             duration = len(AudioSegment.from_file(str(path))) / 1000.0
         except Exception:
             return None
-        self._audio_duration_cache[resolved] = duration
+        with self._audio_duration_cache_lock:
+            self._audio_duration_cache[resolved] = duration
         return duration
 
     def task_audio_duration_seconds(self, row: sqlite3.Row, payload: dict[str, Any], result: dict[str, Any] | None) -> float | None:
@@ -2344,6 +2542,237 @@ class PipelineRuntime:
             "recent_stems": outputs,
         }
 
+    @staticmethod
+    def _ref_for_format(refs: dict[str, Any], audio_format: str) -> dict[str, Any] | None:
+        value = refs.get(audio_format)
+        if isinstance(value, dict):
+            return dict(value) | {"format": audio_format}
+        return None
+
+    def preferred_artifact_audio_ref(self, artifact: dict[str, Any]) -> dict[str, Any] | None:
+        metadata = artifact.get("metadata") if isinstance(artifact.get("metadata"), dict) else {}
+        refs = metadata.get("refs") if isinstance(metadata, dict) and isinstance(metadata.get("refs"), dict) else {}
+        preferred = self._ref_for_format(refs, "mp3") or self._ref_for_format(refs, "wav")
+        if preferred:
+            return preferred
+
+        path_ref_value = artifact.get("path_ref")
+        if isinstance(path_ref_value, dict):
+            suffix = Path(str(path_ref_value.get("path") or "")).suffix.lower().lstrip(".")
+            return dict(path_ref_value) | {"format": suffix or "audio"}
+        return None
+
+    @staticmethod
+    def sound_label_for_artifact(artifact: dict[str, Any]) -> str:
+        metadata = artifact.get("metadata") if isinstance(artifact.get("metadata"), dict) else {}
+        selected_effect = metadata.get("selected_effect") if isinstance(metadata, dict) else None
+        if artifact.get("kind") == ARTIFACT_SFX_ISOLATED_TRACK and isinstance(selected_effect, dict):
+            label = str(selected_effect.get("label") or "").strip()
+            if label:
+                return label
+        return {
+            ARTIFACT_MUSIC_TRACK: "music",
+            ARTIFACT_SFX_VOICE_TRACK: "sfx+voice",
+            ARTIFACT_VOICE_TRACK: "voice",
+            ARTIFACT_SFX_TRACK: "sfx",
+            ARTIFACT_SFX_ISOLATED_TRACK: str(artifact.get("prompt") or "isolated sfx").strip() or "isolated sfx",
+            ARTIFACT_SFX_REMAINING_TRACK: "remaining sfx",
+        }.get(str(artifact.get("kind") or ""), str(artifact.get("kind") or "audio"))
+
+    def sound_row(self, row: sqlite3.Row) -> dict[str, Any]:
+        chunk = dict(row)
+        audio = path_ref(chunk.get("audio_path"), self.config.output_dir)
+        if audio:
+            suffix = Path(str(audio.get("path") or "")).suffix.lower().lstrip(".")
+            audio = dict(audio) | {"format": suffix or "audio"}
+        return {
+            "artifact_id": None,
+            "job_id": chunk["job_id"],
+            "chunk_id": chunk["id"],
+            "chunk_index": chunk["chunk_index"],
+            "start_ms": chunk["start_ms"],
+            "end_ms": chunk["end_ms"],
+            "duration_ms": chunk["duration_ms"],
+            "sound": f"chunk {chunk['chunk_index']}",
+            "kind": "source_chunk",
+            "stage": chunk["stage"],
+            "prompt": chunk.get("job_prompt"),
+            "text": None,
+            "created_at": chunk["created_at"],
+            "updated_at": chunk["updated_at"],
+            "audio": audio,
+        }
+
+    def sounds(self, *, limit: int = 100, offset: int = 0) -> dict[str, Any]:
+        safe_limit = max(1, min(limit, 500))
+        safe_offset = max(0, offset)
+        with self.connect() as conn:
+            total = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+            rows = conn.execute(
+                """
+                SELECT
+                    c.*,
+                    j.prompt AS job_prompt,
+                    j.source_audio_path
+                FROM chunks c
+                JOIN jobs j ON j.id = c.job_id
+                ORDER BY c.created_at DESC, c.chunk_index DESC
+                LIMIT ? OFFSET ?
+                """,
+                (safe_limit, safe_offset),
+            ).fetchall()
+        return {
+            "limit": safe_limit,
+            "offset": safe_offset,
+            "total": total,
+            "rows": [self.sound_row(row) for row in rows],
+        }
+
+    @staticmethod
+    def local_path_for_ref(ref: dict[str, Any] | None) -> Path | None:
+        if not isinstance(ref, dict):
+            return None
+        raw = ref.get("local_path") or ref.get("path")
+        if not raw or str(raw).startswith("s3://"):
+            return None
+        return Path(str(raw)).expanduser().resolve()
+
+    @staticmethod
+    def waveform_peaks(audio_path: Path, *, max_points: int = 600) -> dict[str, Any]:
+        audio = AudioSegment.from_file(str(audio_path)).set_channels(1)
+        samples = audio.get_array_of_samples()
+        if not samples:
+            return {"duration_ms": len(audio), "sample_rate": audio.frame_rate, "peaks": []}
+
+        max_possible = float(audio.max_possible_amplitude) or 1.0
+        bucket_size = max(1, math.ceil(len(samples) / max_points))
+        peaks = []
+        for start in range(0, len(samples), bucket_size):
+            window = samples[start : start + bucket_size]
+            peak = max(abs(sample) for sample in window) / max_possible if window else 0.0
+            peaks.append(round(min(1.0, peak), 4))
+        return {"duration_ms": len(audio), "sample_rate": audio.frame_rate, "peaks": peaks}
+
+    @staticmethod
+    def waveform_lane_order(lane: dict[str, Any]) -> tuple[int, int, str]:
+        if lane["kind"] == "source_chunk":
+            return (0, 0, lane["id"])
+        order = {
+            ARTIFACT_MUSIC_TRACK: 10,
+            ARTIFACT_SFX_VOICE_TRACK: 20,
+            ARTIFACT_VOICE_TRACK: 30,
+            ARTIFACT_SFX_TRACK: 40,
+            ARTIFACT_SFX_ISOLATED_TRACK: 50,
+            ARTIFACT_SFX_REMAINING_TRACK: 51,
+        }.get(lane["kind"], 90)
+        metadata = lane.get("metadata") if isinstance(lane.get("metadata"), dict) else {}
+        iteration = int(metadata.get("iteration") or 0)
+        return (order, iteration, lane["id"])
+
+    def waveform_lane(self, *, lane_id: str, kind: str, label: str, audio: dict[str, Any] | None, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+        lane = {
+            "id": lane_id,
+            "kind": kind,
+            "label": label,
+            "audio": audio,
+            "metadata": metadata or {},
+            "waveform": None,
+            "waveform_unavailable": None,
+        }
+        local_path = self.local_path_for_ref(audio)
+        if local_path is None:
+            lane["waveform_unavailable"] = "no local audio path"
+            return lane
+        if not local_path.is_file():
+            lane["waveform_unavailable"] = f"audio file not found: {local_path}"
+            return lane
+        try:
+            lane["waveform"] = self.waveform_peaks(local_path)
+        except Exception as exc:
+            lane["waveform_unavailable"] = exception_detail(exc)
+        return lane
+
+    def chunk_waveforms(self, chunk_id: str) -> dict[str, Any]:
+        with self.connect() as conn:
+            chunk = conn.execute(
+                """
+                SELECT
+                    c.*,
+                    j.source_audio_path,
+                    j.prompt AS job_prompt,
+                    j.status AS job_status
+                FROM chunks c
+                JOIN jobs j ON j.id = c.job_id
+                WHERE c.id = ?
+                """,
+                (chunk_id,),
+            ).fetchone()
+            if chunk is None:
+                raise KeyError(chunk_id)
+            artifact_rows = [
+                self._artifact_row(row)
+                for row in conn.execute(
+                    f"""
+                    SELECT a.*
+                    FROM artifacts a
+                    WHERE a.chunk_id = ?
+                      AND a.kind IN ({",".join("?" for _ in SOUND_AUDIO_ARTIFACT_KINDS)})
+                    ORDER BY a.created_at ASC
+                    """,
+                    (chunk_id, *SOUND_AUDIO_ARTIFACT_KINDS),
+                )
+            ]
+
+        chunk_data = dict(chunk)
+        chunk_audio = path_ref(chunk_data.get("audio_path"), self.config.output_dir)
+        lanes = [
+            self.waveform_lane(
+                lane_id=f"{chunk_id}:source",
+                kind="source_chunk",
+                label=f"chunk {chunk_data['chunk_index']} source",
+                audio=chunk_audio,
+                metadata={
+                    "start_ms": chunk_data["start_ms"],
+                    "end_ms": chunk_data["end_ms"],
+                    "duration_ms": chunk_data["duration_ms"],
+                },
+            )
+        ]
+        for artifact in artifact_rows:
+            audio = self.preferred_artifact_audio_ref(artifact)
+            lanes.append(
+                self.waveform_lane(
+                    lane_id=artifact["id"],
+                    kind=artifact["kind"],
+                    label=self.sound_label_for_artifact(artifact),
+                    audio=audio,
+                    metadata={
+                        "artifact_id": artifact["id"],
+                        "prompt": artifact.get("prompt"),
+                        "text": artifact.get("text"),
+                        **(artifact.get("metadata") if isinstance(artifact.get("metadata"), dict) else {}),
+                    },
+                )
+            )
+
+        lanes.sort(key=self.waveform_lane_order)
+        return {
+            "chunk": {
+                "id": chunk_data["id"],
+                "job_id": chunk_data["job_id"],
+                "chunk_index": chunk_data["chunk_index"],
+                "audio_path": chunk_data["audio_path"],
+                "start_ms": chunk_data["start_ms"],
+                "end_ms": chunk_data["end_ms"],
+                "duration_ms": chunk_data["duration_ms"],
+                "stage": chunk_data["stage"],
+                "error": chunk_data["error"],
+                "job_prompt": chunk_data["job_prompt"],
+                "job_status": chunk_data["job_status"],
+            },
+            "lanes": lanes,
+        }
+
     def _task_row(self, row: sqlite3.Row) -> dict[str, Any]:
         data = dict(row)
         data["payload"] = json_loads(data.pop("payload_json", None), {})
@@ -2418,6 +2847,9 @@ DASHBOARD_HTML = """<!doctype html>
     .meta { margin-top: 6px; color: var(--muted); font-size: 13px; }
     .section-head { display: flex; gap: 12px; align-items: center; justify-content: space-between; padding: 14px 16px; border-bottom: 1px solid var(--soft-line); }
     .section-head h2 { white-space: nowrap; }
+    .top-nav { margin-top: 12px; display: flex; gap: 8px; flex-wrap: wrap; }
+    .top-nav a { padding: 7px 10px; border: 1px solid var(--line); border-radius: 6px; color: var(--ink); text-decoration: none; font-size: 13px; font-weight: 650; background: #fff; }
+    .top-nav a.active { border-color: #1f5eff; color: #1f5eff; background: #eff6ff; }
     .submit-section { padding: 14px 16px; }
     .submit-section form { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
     .status-strip { display: flex; gap: 8px; flex-wrap: wrap; }
@@ -2461,6 +2893,23 @@ DASHBOARD_HTML = """<!doctype html>
     .tables { display: grid; grid-template-columns: minmax(0, 1fr); gap: 18px; }
     .table-section { padding: 16px; }
     .two { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 18px; }
+    .sounds-view, .chunk-view { display: none; }
+    body[data-view="sounds"] .overview-view, body[data-view="chunk"] .overview-view { display: none; }
+    body[data-view="sounds"] .sounds-view, body[data-view="chunk"] .chunk-view { display: block; }
+    .clickable-row { cursor: pointer; }
+    .clickable-row:hover td { background: #f5f8fc; }
+    .view-empty, .view-error, .view-loading { color: var(--muted); padding: 14px 0; font-size: 13px; }
+    .view-error { color: #c53232; }
+    .chunk-meta { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+    .waveform-list { display: grid; gap: 8px; margin-top: 14px; }
+    .waveform-lane { display: grid; grid-template-columns: minmax(110px, 170px) minmax(240px, 1fr); gap: 12px; align-items: stretch; border: 1px solid var(--line); border-radius: 7px; background: #fbfcfd; padding: 10px; }
+    .waveform-label { min-width: 0; }
+    .waveform-title { font-weight: 700; font-size: 13px; }
+    .waveform-subtitle { margin-top: 4px; color: var(--muted); font-size: 12px; word-break: break-word; }
+    .waveform-panel { min-width: 0; }
+    .waveform-scale { display: flex; justify-content: space-between; color: var(--muted); font-size: 11px; margin-bottom: 4px; }
+    .waveform-canvas { width: 100%; height: 68px; display: block; border: 1px solid var(--soft-line); border-radius: 6px; background: #fff; }
+    audio { width: 100%; max-width: 520px; height: 32px; margin-top: 6px; }
     .status-failed { color: #c53232; font-weight: 650; }
     .status-complete, .status-completed { color: #18733f; font-weight: 650; }
     .status-running { color: #9a5a00; font-weight: 650; }
@@ -2469,6 +2918,7 @@ DASHBOARD_HTML = """<!doctype html>
       main, header { padding-left: 14px; padding-right: 14px; }
       .section-head { align-items: flex-start; flex-direction: column; }
       .node-inspector { grid-template-columns: 1fr; }
+      .waveform-lane { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -2476,9 +2926,13 @@ DASHBOARD_HTML = """<!doctype html>
   <header>
     <h1>QLabeler Pipeline</h1>
     <div class="meta" id="meta">Loading...</div>
+    <nav class="top-nav" aria-label="Dashboard views">
+      <a href="#overview" data-nav="overview">Overview</a>
+      <a href="#sounds" data-nav="sounds">Chunks</a>
+    </nav>
   </header>
   <main>
-    <section class="submit-section">
+    <section class="submit-section overview-view">
       <form id="job-form">
         <input id="audio-file" type="file" accept="audio/*,.mp3,.wav,.flac,.m4a" required>
         <input id="prompt" placeholder="Optional Audio Flamingo prompt">
@@ -2486,7 +2940,7 @@ DASHBOARD_HTML = """<!doctype html>
       </form>
     </section>
 
-    <section class="flow-board">
+    <section class="flow-board overview-view">
       <div class="section-head">
         <h2>Pipeline Graph</h2>
         <div class="status-strip" id="summary"></div>
@@ -2714,7 +3168,7 @@ DASHBOARD_HTML = """<!doctype html>
       <div id="node-inspector" class="node-inspector"></div>
     </section>
 
-    <div class="two">
+    <div class="two overview-view">
       <section class="table-section">
         <h2>Stages</h2>
         <table id="stages"></table>
@@ -2725,7 +3179,7 @@ DASHBOARD_HTML = """<!doctype html>
       </section>
     </div>
 
-    <div class="tables">
+    <div class="tables overview-view">
       <section class="table-section">
         <h2>Recent Jobs</h2>
         <table id="jobs"></table>
@@ -2739,6 +3193,23 @@ DASHBOARD_HTML = """<!doctype html>
         <table id="outputs"></table>
       </section>
     </div>
+
+    <section class="table-section sounds-view">
+      <div class="section-head">
+        <h2>Chunks</h2>
+        <button class="secondary" type="button" id="sounds-refresh">Refresh</button>
+      </div>
+      <div id="sounds-state" class="view-loading">Loading...</div>
+      <table id="sounds-table"></table>
+    </section>
+
+    <section class="table-section chunk-view">
+      <div class="section-head">
+        <h2>Chunk Detail</h2>
+        <a href="#sounds">Back to chunks</a>
+      </div>
+      <div id="chunk-detail"></div>
+    </section>
   </main>
   <script>
     const FLOW_NODES = {
@@ -2766,6 +3237,9 @@ DASHBOARD_HTML = """<!doctype html>
     };
     let selectedNode = 'source';
     let latestData = null;
+    let currentView = 'overview';
+    let loadedSounds = false;
+    let loadedChunkId = null;
 
     const statusClass = value => `status-${String(value || '').replaceAll('_', '-')}`;
     const esc = value => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
@@ -2805,6 +3279,13 @@ DASHBOARD_HTML = """<!doctype html>
       if (!seconds) return '—';
       if (seconds < 1) return `${Math.round(seconds * 1000)}ms`;
       return `${seconds.toFixed(seconds >= 10 ? 1 : 2)}s`;
+    }
+
+    function formatMs(value) {
+      const ms = number(value);
+      if (!ms) return '0s';
+      const seconds = ms / 1000;
+      return seconds >= 60 ? `${(seconds / 60).toFixed(1)}m` : `${seconds.toFixed(seconds >= 10 ? 1 : 2)}s`;
     }
 
     function formatRealtime(metric) {
@@ -3074,6 +3555,150 @@ DASHBOARD_HTML = """<!doctype html>
       document.getElementById('outputs').innerHTML = rows(['Kind', 'Chunk', 'Prompt/Text', 'File', 'Created'], data.recent_outputs, o => [`<td><code>${esc(o.kind)}</code></td>`, `<td>${esc(o.chunk_index || '')}</td>`, `<td>${esc(o.text || o.prompt || '')}</td>`, `<td>${link(o.path_ref)}</td>`, `<td>${esc(o.created_at)}</td>`]);
     }
 
+    function renderSounds(data) {
+      const state = document.getElementById('sounds-state');
+      const table = document.getElementById('sounds-table');
+      const rowsData = data.rows || [];
+      state.textContent = rowsData.length ? `${rowsData.length} of ${data.total || rowsData.length} chunks` : '';
+      state.className = rowsData.length ? 'meta' : 'view-empty';
+      if (!rowsData.length) {
+        table.innerHTML = '';
+        state.textContent = 'No chunks yet.';
+        return;
+      }
+      table.innerHTML = `
+        <thead><tr><th>Chunk</th><th>Time</th><th>Prompt</th><th>Whole Audio</th><th>Stage</th><th>Created</th></tr></thead>
+        <tbody>
+          ${rowsData.map(row => `
+            <tr class="clickable-row" data-chunk-id="${esc(row.chunk_id)}">
+              <td><code>${esc(row.sound)}</code></td>
+              <td>${formatMs(row.start_ms)}-${formatMs(row.end_ms)}</td>
+              <td>${esc(row.prompt || row.text || '')}</td>
+              <td>${link(row.audio)}${row.audio && row.audio.format ? `<div class="meta">${esc(row.audio.format)}</div>` : ''}</td>
+              <td><code>${esc(row.stage || row.kind)}</code></td>
+              <td>${esc(row.created_at)}</td>
+            </tr>`).join('')}
+        </tbody>`;
+      table.querySelectorAll('[data-chunk-id]').forEach(row => {
+        row.addEventListener('click', event => {
+          const target = event.target;
+          if (target && target.closest && target.closest('a')) return;
+          location.hash = `#chunk/${row.dataset.chunkId}`;
+        });
+      });
+    }
+
+    async function loadSounds(force = false) {
+      if (loadedSounds && !force) return;
+      const state = document.getElementById('sounds-state');
+      state.textContent = 'Loading...';
+      state.className = 'view-loading';
+      document.getElementById('sounds-table').innerHTML = '';
+      try {
+        const data = await fetch('/api/sounds?limit=200').then(r => {
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          return r.json();
+        });
+        renderSounds(data);
+        loadedSounds = true;
+      } catch (error) {
+        state.textContent = `Could not load sounds: ${error.message || error}`;
+        state.className = 'view-error';
+      }
+    }
+
+    function laneAudio(lane) {
+      const ref = lane.audio || {};
+      const href = ref.url || '';
+      const player = href ? `<audio controls preload="none" src="${esc(href)}"></audio>` : '';
+      return `${link(ref)}${player}`;
+    }
+
+    function renderChunkDetail(data) {
+      const chunk = data.chunk || {};
+      const lanes = data.lanes || [];
+      const detail = document.getElementById('chunk-detail');
+      detail.innerHTML = `
+        <div>
+          <h2>Chunk ${esc(chunk.chunk_index || '')}</h2>
+          <div class="chunk-meta">
+            <span class="status-pill">Job <strong>${esc(chunk.job_id || '')}</strong></span>
+            <span class="status-pill">Stage <strong>${esc(chunk.stage || '')}</strong></span>
+            <span class="status-pill">Start <strong>${formatMs(chunk.start_ms)}</strong></span>
+            <span class="status-pill">End <strong>${formatMs(chunk.end_ms)}</strong></span>
+            <span class="status-pill">Duration <strong>${formatMs(chunk.duration_ms)}</strong></span>
+          </div>
+        </div>
+        <div class="waveform-list">
+          ${lanes.map((lane, index) => {
+            const waveform = lane.waveform || {};
+            const unavailable = lane.waveform_unavailable ? `<div class="waveform-subtitle">${esc(lane.waveform_unavailable)}</div>` : '';
+            return `
+              <div class="waveform-lane">
+                <div class="waveform-label">
+                  <div class="waveform-title">${esc(lane.label)}</div>
+                  <div class="waveform-subtitle"><code>${esc(lane.kind)}</code></div>
+                  ${lane.metadata && lane.metadata.prompt ? `<div class="waveform-subtitle">${esc(lane.metadata.prompt)}</div>` : ''}
+                  ${laneAudio(lane)}
+                </div>
+                <div class="waveform-panel">
+                  <div class="waveform-scale"><span>0</span><span>${formatMs(waveform.duration_ms || chunk.duration_ms)}</span></div>
+                  <canvas class="waveform-canvas" data-lane-index="${index}" width="900" height="68"></canvas>
+                  ${unavailable}
+                </div>
+              </div>`;
+          }).join('') || '<div class="view-empty">No waveform lanes.</div>'}
+        </div>`;
+      drawWaveforms(lanes);
+    }
+
+    function drawWaveforms(lanes) {
+      document.querySelectorAll('.waveform-canvas').forEach(canvas => {
+        const lane = lanes[number(canvas.dataset.laneIndex)] || {};
+        const peaks = (lane.waveform || {}).peaks || [];
+        const ratio = window.devicePixelRatio || 1;
+        const cssWidth = Math.max(1, canvas.clientWidth || 900);
+        const cssHeight = Math.max(1, canvas.clientHeight || 68);
+        canvas.width = Math.floor(cssWidth * ratio);
+        canvas.height = Math.floor(cssHeight * ratio);
+        const ctx = canvas.getContext('2d');
+        ctx.scale(ratio, ratio);
+        ctx.clearRect(0, 0, cssWidth, cssHeight);
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, cssWidth, cssHeight);
+        ctx.strokeStyle = '#d9dee7';
+        ctx.beginPath();
+        ctx.moveTo(0, cssHeight / 2);
+        ctx.lineTo(cssWidth, cssHeight / 2);
+        ctx.stroke();
+        if (!peaks.length) return;
+        const barWidth = cssWidth / peaks.length;
+        ctx.fillStyle = '#2f7de1';
+        peaks.forEach((peak, index) => {
+          const height = Math.max(1, peak * (cssHeight - 12));
+          const x = index * barWidth;
+          const y = (cssHeight - height) / 2;
+          ctx.fillRect(x, y, Math.max(1, barWidth - 1), height);
+        });
+      });
+    }
+
+    async function loadChunk(chunkId) {
+      if (loadedChunkId === chunkId) return;
+      const detail = document.getElementById('chunk-detail');
+      loadedChunkId = chunkId;
+      detail.innerHTML = '<div class="view-loading">Loading...</div>';
+      try {
+        const data = await fetch(`/api/chunks/${encodeURIComponent(chunkId)}/waveforms`).then(r => {
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          return r.json();
+        });
+        renderChunkDetail(data);
+      } catch (error) {
+        detail.innerHTML = `<div class="view-error">Could not load chunk: ${esc(error.message || error)}</div>`;
+      }
+    }
+
     function renderSummary(data) {
       const jobs = data.jobs || { queued: 0, running: 0, complete: 0, failed: 0 };
       const activeJobs = number(jobs.queued) + number(jobs.running);
@@ -3101,6 +3726,7 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     async function refresh() {
+      if (currentView !== 'overview') return;
       const data = await fetch('/api/dashboard').then(r => r.json());
       latestData = data;
       document.getElementById('meta').textContent = `backend=${data.backend} storage=${data.storage_backend || 'local'} db=${data.db_path}`;
@@ -3111,6 +3737,28 @@ DASHBOARD_HTML = """<!doctype html>
 
     async function retryTask(id) {
       await fetch(`/api/tasks/${id}/retry`, { method: 'POST' });
+      refresh();
+    }
+
+    function activateRoute() {
+      const hash = location.hash || '#overview';
+      if (hash.startsWith('#chunk/')) {
+        currentView = 'chunk';
+        document.body.dataset.view = 'chunk';
+        document.querySelectorAll('[data-nav]').forEach(item => item.classList.remove('active'));
+        loadChunk(decodeURIComponent(hash.slice('#chunk/'.length)));
+        return;
+      }
+      if (hash === '#sounds') {
+        currentView = 'sounds';
+        document.body.dataset.view = 'sounds';
+        document.querySelectorAll('[data-nav]').forEach(item => item.classList.toggle('active', item.dataset.nav === 'sounds'));
+        loadSounds();
+        return;
+      }
+      currentView = 'overview';
+      document.body.dataset.view = 'overview';
+      document.querySelectorAll('[data-nav]').forEach(item => item.classList.toggle('active', item.dataset.nav === 'overview'));
       refresh();
     }
 
@@ -3139,9 +3787,12 @@ DASHBOARD_HTML = """<!doctype html>
       const response = await fetch('/api/jobs/upload', { method: 'POST', body });
       if (!response.ok) alert(await response.text());
       document.getElementById('audio-file').value = '';
+      loadedSounds = false;
       refresh();
     });
-    refresh();
+    document.getElementById('sounds-refresh').addEventListener('click', () => loadSounds(true));
+    window.addEventListener('hashchange', activateRoute);
+    activateRoute();
     setInterval(refresh, 5000);
   </script>
 </body>
@@ -3188,6 +3839,13 @@ def create_app(config: PipelineConfig | None = None, storage: ArtifactStorage | 
     def api_dashboard() -> dict[str, Any]:
         return runtime.dashboard_summary()
 
+    @app.get("/api/sounds")
+    def api_sounds(
+        limit: int = Query(default=100, ge=1, le=500),
+        offset: int = Query(default=0, ge=0),
+    ) -> dict[str, Any]:
+        return runtime.sounds(limit=limit, offset=offset)
+
     @app.post("/api/jobs")
     def create_job(request: JobCreateRequest) -> dict[str, Any]:
         try:
@@ -3216,6 +3874,13 @@ def create_app(config: PipelineConfig | None = None, storage: ArtifactStorage | 
             return runtime.job_detail(job_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=f"Job not found: {job_id}") from exc
+
+    @app.get("/api/chunks/{chunk_id}/waveforms")
+    def chunk_waveforms(chunk_id: str) -> dict[str, Any]:
+        try:
+            return runtime.chunk_waveforms(chunk_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=f"Chunk not found: {chunk_id}") from exc
 
     @app.post("/api/tasks/{task_id}/retry", response_model=RetryResponse)
     def retry_task(task_id: str) -> RetryResponse:
