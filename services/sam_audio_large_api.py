@@ -450,6 +450,7 @@ def run_separation(
 
     with _inference_lock:
         inputs = state.processor(**processor_kwargs).to(state.device)
+        inputs.audios = inputs.audios.to(state.dtype)
         result = state.model.separate(
             inputs,
             predict_spans=predict_spans,
@@ -540,6 +541,7 @@ def run_separation_batch(
 
             with _inference_lock:
                 inputs = state.processor(**processor_kwargs).to(state.device)
+                inputs.audios = inputs.audios.to(state.dtype)
                 result = state.model.separate(
                     inputs,
                     predict_spans=predict_spans,
