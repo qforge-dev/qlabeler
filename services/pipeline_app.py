@@ -871,11 +871,7 @@ class PipelineRuntime:
                 has_voices = job_row["has_voices"] if job_row and job_row["has_voices"] is not None else 1
 
                 if has_music:
-                    # Use the detailed music description from scene analysis as the SAM prompt.
-                    job_row2 = conn.execute(
-                        "SELECT music_description FROM jobs WHERE id = ?", (task["job_id"],)
-                    ).fetchone()
-                    music_prompt = (job_row2["music_description"] if job_row2 and job_row2["music_description"] else None) or "music"
+                    # Use simple NP/VP prompts as recommended by Meta's SAM-Audio README.
                     # Normal flow: separate music first.
                     conn.execute(
                         "UPDATE chunks SET stage = ?, error = NULL, updated_at = ? WHERE id = ?",
@@ -889,7 +885,7 @@ class PipelineRuntime:
                         payload={
                             "purpose": PURPOSE_SEPARATE_MUSIC,
                             "audio_path": str(audio_path),
-                            "prompt": music_prompt,
+                            "prompt": "music",
                         },
                         created_at=timestamp,
                     )
