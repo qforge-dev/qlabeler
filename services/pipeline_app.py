@@ -2011,10 +2011,53 @@ class PipelineRuntime:
         if not remaining_path:
             raise RuntimeError(f"SAM-Audio SFX response missing residual audio path: {response}")
 
+        # Check if the isolated SFX target actually has meaningful audio.
+        # If it's empty/silent, the separation produced nothing — stop the loop.
+        isolated_gate = self.sound_gate(Path(isolated_path))
+
         payload = json_loads(task["payload_json"], {})
         iteration = int(payload.get("iteration") or 1)
         with self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+
+            if not isolated_gate["has_sound"]:
+                # Isolated target is empty — separation failed to extract anything.
+                # Don't store the empty artifact. Stop the loop here.
+                self._insert_artifact(
+                    conn,
+                    job_id=task["job_id"],
+                    chunk_id=task["chunk_id"],
+                    task_id=task["id"],
+                    kind=ARTIFACT_SFX_LOOP_DEBUG,
+                    path=isolated_path,
+                    text=f"SFX extraction produced empty target at iteration {iteration}. Stopping.",
+                    prompt=prompt,
+                    metadata={
+                        "reason": "target_empty",
+                        "iteration": iteration,
+                        "gate": isolated_gate,
+                    },
+                    created_at=timestamp,
+                )
+                conn.execute(
+                    "UPDATE chunks SET stage = ?, error = NULL, updated_at = ? WHERE id = ?",
+                    (STAGE_SFX_EXHAUSTED, timestamp, task["chunk_id"]),
+                )
+                self._complete_task_conn(conn, task["id"], response, timestamp)
+                self._insert_event(
+                    conn,
+                    job_id=task["job_id"],
+                    chunk_id=task["chunk_id"],
+                    task_id=task["id"],
+                    level="info",
+                    message=f"SFX loop stopped: isolated target empty at iteration {iteration}",
+                    data={"prompt": prompt, "gate": isolated_gate},
+                    created_at=timestamp,
+                )
+                self._update_job_status_conn(conn, task["job_id"], timestamp)
+                conn.execute("COMMIT")
+                return
+
             isolated_artifact_id = self._insert_artifact(
                 conn,
                 job_id=task["job_id"],
@@ -2031,10 +2074,10 @@ class PipelineRuntime:
                     "source_artifact_id": payload.get("source_artifact_id"),
                     "refs": target,
                     "response": response,
+                    "gate": isolated_gate,
                 },
                 created_at=timestamp,
             )
-            remaining_artifact_id = self._insert_artifact(
                 conn,
                 job_id=task["job_id"],
                 chunk_id=task["chunk_id"],
@@ -3142,8 +3185,10 @@ DASHBOARD_HTML = """<!doctype html>
     .daw-mute-btn.muted { background: #4a2a2a; color: #df6d6d; border-color: #5a3a3a; }
     .daw-track-info { min-width: 0; }
     .daw-track-title { font-weight: 700; font-size: 12px; color: #e0e0e0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .daw-track-title:hover { white-space: normal; overflow: visible; word-break: break-word; }
     .daw-track-kind { font-size: 11px; color: #888; }
-    .daw-track-prompt { font-size: 11px; color: #aad; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 130px; cursor: help; }
+    .daw-track-prompt { font-size: 11px; color: #aad; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 130px; }
+    .daw-track-prompt:hover { white-space: normal; overflow: visible; max-width: none; word-break: break-word; }
     .daw-download-btn { display: flex; align-items: center; justify-content: center; width: 28px; height: 28px; margin-left: auto; background: #2a3a4a; color: #8cf; border-radius: 4px; text-decoration: none; font-size: 14px; border: 1px solid #3a5a6a; }
     .daw-download-btn:hover { background: #3a4a5a; }
     .daw-track-waveform { position: relative; padding: 4px 0; cursor: pointer; }
@@ -3883,9 +3928,9 @@ DASHBOARD_HTML = """<!doctype html>
                     ${isSource ? '&#128264;' : '&#128263;'}
                   </button>
                   <div class="daw-track-info">
-                    <div class="daw-track-title" title="${esc((lane.metadata || {}).prompt || '')}">${esc(lane.label)}</div>
+                    <div class="daw-track-title">${esc(lane.label)}</div>
                     <div class="daw-track-kind"><code>${esc(lane.kind)}</code></div>
-                    ${(lane.metadata || {}).prompt ? `<div class="daw-track-prompt" title="${esc(lane.metadata.prompt)}">${esc(lane.metadata.prompt)}</div>` : ''}
+                    ${(lane.metadata || {}).prompt ? `<div class="daw-track-prompt">${esc(lane.metadata.prompt)}</div>` : ''}
                   </div>
                   ${href ? `<a class="daw-download-btn" href="${esc(href)}" download title="Download">&#11015;</a>` : ''}
                 </div>
