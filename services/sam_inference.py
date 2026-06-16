@@ -81,6 +81,12 @@ def get_model():
             _model.visual_ranker.float()
         if hasattr(_model, "audio_codec") and _model.audio_codec is not None:
             _model.audio_codec.float()
+            # Patch codec.decode to cast fp16 inputs to fp32 automatically
+            import types
+            _original_decode = _model.audio_codec.decode
+            def _patched_decode(features, *args, **kwargs):
+                return _original_decode(features.float(), *args, **kwargs)
+            _model.audio_codec.decode = _patched_decode
 
     _processor = SAMAudioProcessor.from_pretrained(MODEL_ID)
     return _model, _processor
