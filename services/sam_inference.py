@@ -126,3 +126,82 @@ def separate(request: SeparateRequest):
         sample_rate=sample_rate,
         duration_seconds=round(duration, 3),
     )
+
+
+class BatchSeparateRequest(BaseModel):
+    audio_path: str = Field(description="Path to audio file (shared volume)")
+    prompts: list[str] = Field(description="List of text prompts to separate simultaneously")
+    predict_spans: bool = True
+    reranking_candidates: int | None = None
+
+
+class BatchSeparateItem(BaseModel):
+    prompt: str
+    target_path: str
+    residual_path: str
+
+
+class BatchSeparateResponse(BaseModel):
+    results: list[BatchSeparateItem]
+    sample_rate: int
+    duration_seconds: float
+
+
+@app.post("/separate_batch", response_model=BatchSeparateResponse)
+def separate_batch(request: BatchSeparateRequest):
+    """Separate multiple prompts from the same audio file in one batch."""
+    audio_path = Path(request.audio_path)
+    if not audio_path.exists():
+        raise HTTPException(status_code=422, detail=f"File not found: {audio_path}")
+
+    model, processor = get_model()
+    reranking = request.reranking_candidates or RERANKING_CANDIDATES
+
+    wav, sr = torchaudio.load(str(audio_path))
+    duration = wav.shape[-1] / sr
+    if duration > 35:
+        raise HTTPException(status_code=422, detail=f"Audio too long: {duration:.1f}s (max 35s)")
+
+    n_prompts = len(request.prompts)
+    # Batch: same file repeated for each prompt
+    batch = processor(
+        audios=[str(audio_path)] * n_prompts,
+        descriptions=request.prompts,
+    ).to("cuda")
+
+    with torch.inference_mode():
+        result = model.separate(
+            batch,
+            predict_spans=request.predict_spans,
+            reranking_candidates=reranking,
+        )
+
+    sample_rate = processor.audio_sampling_rate
+    request_id = uuid.uuid4().hex[:12]
+    out_dir = OUTPUT_DIR / request_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    items = []
+    for i, prompt in enumerate(request.prompts):
+        target = result.target[i] if isinstance(result.target, list) else result.target
+        residual = result.residual[i] if isinstance(result.residual, list) else result.residual
+        if target.ndim == 1:
+            target = target.unsqueeze(0)
+        if residual.ndim == 1:
+            residual = residual.unsqueeze(0)
+
+        target_path = out_dir / f"{i}_{prompt.replace(' ', '_')}_target.wav"
+        residual_path = out_dir / f"{i}_{prompt.replace(' ', '_')}_residual.wav"
+        torchaudio.save(str(target_path), target.float().cpu(), sample_rate)
+        torchaudio.save(str(residual_path), residual.float().cpu(), sample_rate)
+        items.append(BatchSeparateItem(
+            prompt=prompt,
+            target_path=str(target_path),
+            residual_path=str(residual_path),
+        ))
+
+    return BatchSeparateResponse(
+        results=items,
+        sample_rate=sample_rate,
+        duration_seconds=round(duration, 3),
+    )
