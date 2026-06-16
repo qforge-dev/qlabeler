@@ -70,12 +70,11 @@ services:
       - "8000:8000"
     volumes:
       - ${OUTPUT_DIR:-./outputs}:/app/outputs
-      - ./pipeline.sqlite3:/app/pipeline.sqlite3
     environment:
       - PIPELINE_BACKEND=real
       - PIPELINE_STORAGE_BACKEND=local
       - OUTPUT_DIR=/app/outputs
-      - PIPELINE_DB_PATH=/app/pipeline.sqlite3
+      - PIPELINE_DB_PATH=/app/outputs/pipeline.sqlite3
       - AFNEXT_ENDPOINT=http://audio-flamingo:8001/v1/audio-flamingo/ask
       - AFNEXT_BATCH_ENDPOINT=http://audio-flamingo:8001/v1/audio-flamingo/ask_batch
       - SAM_AUDIO_ENDPOINT=http://sam-audio:8002/v1/sam-audio/separate
