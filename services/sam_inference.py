@@ -73,24 +73,13 @@ def get_model():
     elif MODEL_DTYPE == "bf16":
         _model = _model.to(torch.bfloat16)
 
-    # Keep ranker and audio codec in fp32 (required for CLAP and DAC layers)
+    # Keep ONLY the ranker in fp32 (CLAP spectrogram Conv1d layers require fp32).
+    # Everything else (codec, main model) stays in the model dtype.
     if MODEL_DTYPE != "fp32":
         if hasattr(_model, "text_ranker") and _model.text_ranker is not None:
             _model.text_ranker.float()
         if hasattr(_model, "visual_ranker") and _model.visual_ranker is not None:
             _model.visual_ranker.float()
-        if hasattr(_model, "audio_codec") and _model.audio_codec is not None:
-            _model.audio_codec.float()
-            # Patch codec.decode to cast fp16/bf16 inputs to fp32 automatically
-            import types
-            _codec = _model.audio_codec
-            _original_decode = _codec.decode.__func__ if hasattr(_codec.decode, '__func__') else None
-
-            def _patched_decode(self, encoded_frames, *args, **kwargs):
-                return _original_decode(self, encoded_frames.float(), *args, **kwargs)
-
-            if _original_decode is not None:
-                _model.audio_codec.decode = types.MethodType(_patched_decode, _model.audio_codec)
 
     _processor = SAMAudioProcessor.from_pretrained(MODEL_ID)
     return _model, _processor
