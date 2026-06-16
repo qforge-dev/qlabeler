@@ -27,6 +27,7 @@ MODEL_ID = os.environ.get("SAM_AUDIO_MODEL_ID", "facebook/sam-audio-large")
 RERANKING_CANDIDATES = int(os.environ.get("SAM_AUDIO_RERANKING_CANDIDATES", "8"))
 MODEL_DTYPE = os.environ.get("SAM_AUDIO_DTYPE", "fp32")  # fp32, fp16, bf16
 RANKER_DTYPE = os.environ.get("SAM_AUDIO_RANKER_DTYPE", "fp32")  # keep fp32 for CLAP compat
+DISABLE_VISION = os.environ.get("SAM_AUDIO_DISABLE_VISION", "0") in ("1", "true", "yes")
 OUTPUT_DIR = Path(os.environ.get("OUTPUT_DIR", "/app/outputs/sam"))
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -48,6 +49,23 @@ def get_model():
     from sam_audio import SAMAudio, SAMAudioProcessor
 
     _model = SAMAudio.from_pretrained(MODEL_ID, proxies=None, resume_download=False).eval().cuda()
+
+    # Optionally remove vision encoder to save VRAM (~3GB)
+    if DISABLE_VISION and hasattr(_model, "vision_encoder"):
+        import types, gc
+        vision_dim = _model.vision_encoder.dim
+        del _model.vision_encoder
+        _model._vision_encoder_dim = vision_dim
+
+        def _get_video_features_audio_only(self, video, audio_features):
+            if video is not None:
+                raise ValueError("Vision encoder disabled (SAM_AUDIO_DISABLE_VISION=1)")
+            batch_size, time_steps, _ = audio_features.shape
+            return audio_features.new_zeros(batch_size, self._vision_encoder_dim, time_steps)
+
+        _model._get_video_features = types.MethodType(_get_video_features_audio_only, _model)
+        gc.collect()
+        torch.cuda.empty_cache()
 
     # Apply model precision
     if MODEL_DTYPE == "fp16":
@@ -96,6 +114,7 @@ def load():
         "model_dtype": MODEL_DTYPE,
         "ranker_dtype": RANKER_DTYPE,
         "reranking_candidates": RERANKING_CANDIDATES,
+        "disable_vision": DISABLE_VISION,
         "dtype": str(next(model.parameters()).dtype),
         "sample_rate": processor.audio_sampling_rate,
     }
