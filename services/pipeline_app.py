@@ -1652,13 +1652,16 @@ class PipelineRuntime:
         prompt = payload["prompt"]
         chunk = self.chunk(task["chunk_id"])
         output_prefix = clean_prefix(f"job_{task['job_id']}_chunk_{chunk['chunk_index']:04d}_{purpose}_{prompt}")
+        # Always use the original chunk audio as the stereo source for panning transfer.
+        source_audio_path = chunk.get("audio_path")
         return {
             "audio_path": str(Path(payload["audio_path"])),
+            "source_audio_path": source_audio_path,
             "input": prompt,
             "output_prefix": output_prefix,
             "max_audio_seconds": max(35, int((chunk["duration_ms"] + 999) / 1000)),
-            "predict_spans": False,
-            "reranking_candidates": 1,
+            "predict_spans": True,
+            "reranking_candidates": 8,
         }
 
     def process_sam_audio(self, task: dict[str, Any]) -> None:

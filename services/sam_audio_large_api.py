@@ -194,11 +194,11 @@ def load_model() -> _ModelState:
 
         ensure_ffmpeg()
         device = "cuda"
-        # Use fp32 (not bf16) because the CLAP reranker used by reranking_candidates
+        # Vanilla Meta loading: fp32, no vision encoder hack.
+        # fp32 is required because the CLAP reranker (used by reranking_candidates>1)
         # does not support bf16. The H100 has 80GB VRAM, fp32 model uses ~33GB.
         model = SAMAudio.from_pretrained(MODEL_ID, proxies=None, resume_download=False)
-        model = disable_vision_encoder_for_audio_only(model)
-        model = model.eval().to(device)
+        model = model.eval().cuda()
         processor = SAMAudioProcessor.from_pretrained(MODEL_ID)
 
         _state.model = model
