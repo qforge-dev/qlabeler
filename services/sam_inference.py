@@ -20,10 +20,18 @@ from pydantic import BaseModel, Field
 
 app = FastAPI(title="SAM-Audio Inference")
 
+# Serve output files
+from fastapi.staticfiles import StaticFiles
+
 MODEL_ID = os.environ.get("SAM_AUDIO_MODEL_ID", "facebook/sam-audio-large")
 RERANKING_CANDIDATES = int(os.environ.get("SAM_AUDIO_RERANKING_CANDIDATES", "8"))
 OUTPUT_DIR = Path(os.environ.get("OUTPUT_DIR", "/app/outputs/sam"))
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+# Serve files from the shared output directory
+SERVE_DIR = Path(os.environ.get("SERVE_DIR", "/app/outputs"))
+if SERVE_DIR.exists():
+    app.mount("/files", StaticFiles(directory=str(SERVE_DIR)), name="files")
 
 _model = None
 _processor = None
