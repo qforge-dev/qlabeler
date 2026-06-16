@@ -1,0 +1,31 @@
+services:
+  sam-audio:
+    build:
+      context: ..
+      dockerfile: docker/sam-inference.Dockerfile
+    ports:
+      - "8002:8002"
+    volumes:
+      - ${HF_HOME:-~/.cache/huggingface}:/root/.cache/huggingface
+      - ${SHARED_DIR:-./shared}:/app/outputs
+    environment:
+      - HF_TOKEN=${HF_TOKEN}
+      - HF_HOME=/root/.cache/huggingface
+      - OUTPUT_DIR=/app/outputs/sam
+      - SAM_AUDIO_MODEL_ID=facebook/sam-audio-large
+      - SAM_AUDIO_RERANKING_CANDIDATES=${SAM_RERANKING_CANDIDATES:-8}
+      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
