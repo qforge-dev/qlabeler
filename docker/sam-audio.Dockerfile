@@ -1,4 +1,4 @@
-FROM nvidia/cuda:12.4.0-runtime-ubuntu22.04
+FROM python:3.11-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
@@ -11,39 +11,38 @@ ENV HF_HUB_DISABLE_XET=1
 
 # System deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.11 python3.11-venv python3.11-dev python3-pip \
     ffmpeg libsndfile1 git curl build-essential \
     && rm -rf /var/lib/apt/lists/*
-
-RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
 
 WORKDIR /app
 
 # Install Python deps
-RUN python3 -m pip install --upgrade pip wheel setuptools
+RUN pip install --upgrade pip wheel setuptools
 
-# Install PyTorch (CUDA 12.4) - this is the big one
-RUN python3 -m pip install torch torchaudio torchvision --index-url https://download.pytorch.org/whl/cu124
+# Install PyTorch (from PyPI, bundles CUDA)
+RUN pip install torch torchaudio torchvision
+
+# Install xformers (needed by perception-models, a transitive dep of sam_audio)
+RUN pip install xformers
 
 # Install SAM-Audio from git
-RUN python3 -m pip install --no-warn-conflicts \
+RUN pip install --no-warn-conflicts \
     "sam_audio @ git+https://github.com/facebookresearch/sam-audio.git"
 
 # Install API deps
-RUN python3 -m pip install --no-warn-conflicts \
+RUN pip install --no-warn-conflicts \
     fastapi \
     "transformers>=4.54,<5" \
     "huggingface_hub>=0.34,<1.0" \
     hf_transfer \
     pydub \
-    "uvicorn[standard]" \
-    audioop-lts
+    "uvicorn[standard]"
 
 # Copy application code
 COPY services/ /app/services/
 
 # Patch SAM-Audio audio loader (replace torchcodec AudioDecoder with torchaudio.load)
-RUN python3 -c "
+RUN python -c "
 from pathlib import Path
 import site
 
