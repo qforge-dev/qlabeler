@@ -18,7 +18,7 @@ WORKDIR /app
 RUN pip install --upgrade pip wheel setuptools
 RUN pip install torch torchaudio torchvision xformers
 RUN pip install --no-warn-conflicts "sam_audio @ git+https://github.com/facebookresearch/sam-audio.git"
-RUN pip install fastapi "uvicorn[standard]"
+RUN pip install fastapi "uvicorn[standard]" "huggingface_hub>=0.34,<0.37" "transformers>=4.54,<5"
 
 # Patch torchcodec AudioDecoder -> torchaudio.load
 COPY docker/patch_sam_audio.py /tmp/patch_sam_audio.py
