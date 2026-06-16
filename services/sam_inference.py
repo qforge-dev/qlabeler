@@ -34,7 +34,7 @@ def get_model():
     if _model is not None:
         return _model, _processor
     from sam_audio import SAMAudio, SAMAudioProcessor
-    _model = SAMAudio.from_pretrained(MODEL_ID).eval().cuda()
+    _model = SAMAudio.from_pretrained(MODEL_ID, proxies=None, resume_download=False).eval().cuda()
     _processor = SAMAudioProcessor.from_pretrained(MODEL_ID)
     return _model, _processor
 
