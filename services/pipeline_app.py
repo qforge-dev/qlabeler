@@ -229,6 +229,7 @@ class PipelineConfig:
     worker_enabled: bool = True
     worker_interval_seconds: float = 1.0
     sam_batch_size: int = 4
+    sam_reranking_candidates: int = 4
     afnext_batch_size: int = 1
     chunk_ms: int = 30_000
     overlap_ms: int = 5_000
@@ -266,6 +267,7 @@ class PipelineConfig:
             worker_enabled=parse_bool(os.environ.get("PIPELINE_WORKER_ENABLED"), default=True),
             worker_interval_seconds=float(os.environ.get("PIPELINE_WORKER_INTERVAL_SECONDS", "1.0")),
             sam_batch_size=max(1, int(os.environ.get("PIPELINE_SAM_BATCH_SIZE", "4"))),
+            sam_reranking_candidates=max(1, int(os.environ.get("PIPELINE_SAM_RERANKING_CANDIDATES", "4"))),
             afnext_batch_size=max(1, int(os.environ.get("PIPELINE_AFNEXT_BATCH_SIZE", "1"))),
             chunk_ms=int(os.environ.get("PIPELINE_CHUNK_SECONDS", "30")) * 1000,
             overlap_ms=int(os.environ.get("PIPELINE_OVERLAP_SECONDS", "5")) * 1000,
@@ -1661,7 +1663,7 @@ class PipelineRuntime:
             "output_prefix": output_prefix,
             "max_audio_seconds": max(35, int((chunk["duration_ms"] + 999) / 1000)),
             "predict_spans": True,
-            "reranking_candidates": 8,
+            "reranking_candidates": self.config.sam_reranking_candidates,
         }
 
     def process_sam_audio(self, task: dict[str, Any]) -> None:

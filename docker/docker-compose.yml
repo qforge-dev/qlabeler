@@ -14,7 +14,7 @@ services:
       - OUTPUT_DIR=/app/outputs
       - SAM_AUDIO_MODEL_ID=facebook/sam-audio-large
       - SAM_AUDIO_PREDICT_SPANS=1
-      - SAM_AUDIO_RERANKING_CANDIDATES=8
+      - SAM_AUDIO_RERANKING_CANDIDATES=${SAM_RERANKING_CANDIDATES:-4}
       - SAM_AUDIO_LOAD_ON_STARTUP=1
       - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
     deploy:
@@ -80,6 +80,7 @@ services:
       - SAM_AUDIO_ENDPOINT=http://sam-audio:8002/v1/sam-audio/separate
       - SAM_AUDIO_BATCH_ENDPOINT=http://sam-audio:8002/v1/sam-audio/separate_batch
       - PIPELINE_WORKER_ENABLED=1
+      - PIPELINE_SAM_RERANKING_CANDIDATES=${SAM_RERANKING_CANDIDATES:-4}
     depends_on:
       sam-audio:
         condition: service_healthy
