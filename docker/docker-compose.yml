@@ -1,0 +1,95 @@
+services:
+  sam-audio:
+    build:
+      context: ..
+      dockerfile: docker/sam-audio.Dockerfile
+    ports:
+      - "8002:8002"
+    volumes:
+      - ${HF_HOME:-~/.cache/huggingface}:/root/.cache/huggingface
+      - ${OUTPUT_DIR:-./outputs}:/app/outputs
+    environment:
+      - HF_TOKEN=${HF_TOKEN}
+      - HF_HOME=/root/.cache/huggingface
+      - OUTPUT_DIR=/app/outputs
+      - SAM_AUDIO_MODEL_ID=facebook/sam-audio-large
+      - SAM_AUDIO_PREDICT_SPANS=1
+      - SAM_AUDIO_RERANKING_CANDIDATES=8
+      - SAM_AUDIO_LOAD_ON_STARTUP=1
+      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+  audio-flamingo:
+    build:
+      context: ..
+      dockerfile: docker/audio-flamingo.Dockerfile
+    ports:
+      - "8001:8001"
+    volumes:
+      - ${HF_HOME:-~/.cache/huggingface}:/root/.cache/huggingface
+      - ${OUTPUT_DIR:-./outputs}:/app/outputs
+    environment:
+      - HF_TOKEN=${HF_TOKEN}
+      - HF_HOME=/root/.cache/huggingface
+      - OUTPUT_DIR=/app/outputs
+      - AFNEXT_MODEL_ID=nvidia/audio-flamingo-next-think-hf
+      - AFNEXT_LOAD_ON_STARTUP=1
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+  pipeline:
+    build:
+      context: ..
+      dockerfile: docker/pipeline.Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      - ${OUTPUT_DIR:-./outputs}:/app/outputs
+      - ./pipeline.sqlite3:/app/pipeline.sqlite3
+    environment:
+      - PIPELINE_BACKEND=real
+      - PIPELINE_STORAGE_BACKEND=local
+      - OUTPUT_DIR=/app/outputs
+      - PIPELINE_DB_PATH=/app/pipeline.sqlite3
+      - AFNEXT_ENDPOINT=http://audio-flamingo:8001/v1/audio-flamingo/ask
+      - AFNEXT_BATCH_ENDPOINT=http://audio-flamingo:8001/v1/audio-flamingo/ask_batch
+      - SAM_AUDIO_ENDPOINT=http://sam-audio:8002/v1/sam-audio/separate
+      - SAM_AUDIO_BATCH_ENDPOINT=http://sam-audio:8002/v1/sam-audio/separate_batch
+      - PIPELINE_WORKER_ENABLED=1
+    depends_on:
+      sam-audio:
+        condition: service_healthy
+      audio-flamingo:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
