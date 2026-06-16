@@ -1,13 +1,13 @@
 services:
   sam-audio:
     build:
-      context: ..
+      context: .
       dockerfile: docker/sam-inference.Dockerfile
     ports:
       - "8002:8002"
     volumes:
       - ${HF_HOME:-~/.cache/huggingface}:/root/.cache/huggingface
-      - ${SHARED_DIR:-./shared}:/app/outputs
+      - ${SHARED_DIR:-./outputs}:/app/outputs
     environment:
       - HF_TOKEN=${HF_TOKEN}
       - HF_HOME=/root/.cache/huggingface
