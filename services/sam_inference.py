@@ -55,12 +55,14 @@ def get_model():
     elif MODEL_DTYPE == "bf16":
         _model = _model.to(torch.bfloat16)
 
-    # Keep ranker in fp32 (CLAP spectrogram Conv1d layers require fp32)
-    if RANKER_DTYPE == "fp32" and MODEL_DTYPE != "fp32":
+    # Keep ranker and audio codec in fp32 (required for CLAP and DAC layers)
+    if MODEL_DTYPE != "fp32":
         if hasattr(_model, "text_ranker") and _model.text_ranker is not None:
             _model.text_ranker.float()
         if hasattr(_model, "visual_ranker") and _model.visual_ranker is not None:
             _model.visual_ranker.float()
+        if hasattr(_model, "audio_codec") and _model.audio_codec is not None:
+            _model.audio_codec.float()
 
     _processor = SAMAudioProcessor.from_pretrained(MODEL_ID)
     return _model, _processor
