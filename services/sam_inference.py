@@ -25,9 +25,12 @@ from fastapi.staticfiles import StaticFiles
 
 MODEL_ID = os.environ.get("SAM_AUDIO_MODEL_ID", "facebook/sam-audio-large")
 RERANKING_CANDIDATES = int(os.environ.get("SAM_AUDIO_RERANKING_CANDIDATES", "8"))
-MODEL_DTYPE = os.environ.get("SAM_AUDIO_DTYPE", "fp32")  # fp32 or fp16
+MODEL_DTYPE = os.environ.get("SAM_AUDIO_DTYPE", "fp32")  # fp32, fp16, bf16
+RANKER_DTYPE = os.environ.get("SAM_AUDIO_RANKER_DTYPE", "fp32")  # keep fp32 for CLAP compat
 OUTPUT_DIR = Path(os.environ.get("OUTPUT_DIR", "/app/outputs/sam"))
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+DTYPE_MAP = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp32": torch.float32}
 
 # Serve files from the shared output directory
 SERVE_DIR = Path(os.environ.get("SERVE_DIR", "/app/outputs"))
@@ -43,9 +46,22 @@ def get_model():
     if _model is not None:
         return _model, _processor
     from sam_audio import SAMAudio, SAMAudioProcessor
+
     _model = SAMAudio.from_pretrained(MODEL_ID, proxies=None, resume_download=False).eval().cuda()
+
+    # Apply model precision
     if MODEL_DTYPE == "fp16":
         _model = _model.half()
+    elif MODEL_DTYPE == "bf16":
+        _model = _model.to(torch.bfloat16)
+
+    # Keep ranker in fp32 (CLAP spectrogram Conv1d layers require fp32)
+    if RANKER_DTYPE == "fp32" and MODEL_DTYPE != "fp32":
+        if hasattr(_model, "text_ranker") and _model.text_ranker is not None:
+            _model.text_ranker.float()
+        if hasattr(_model, "visual_ranker") and _model.visual_ranker is not None:
+            _model.visual_ranker.float()
+
     _processor = SAMAudioProcessor.from_pretrained(MODEL_ID)
     return _model, _processor
 
@@ -75,6 +91,9 @@ def load():
     return {
         "ready": True,
         "model_id": MODEL_ID,
+        "model_dtype": MODEL_DTYPE,
+        "ranker_dtype": RANKER_DTYPE,
+        "reranking_candidates": RERANKING_CANDIDATES,
         "dtype": str(next(model.parameters()).dtype),
         "sample_rate": processor.audio_sampling_rate,
     }
@@ -97,8 +116,8 @@ def separate(request: SeparateRequest):
 
     # Run separation
     batch = processor(audios=[str(audio_path)], descriptions=[request.prompt]).to("cuda")
-    if MODEL_DTYPE == "fp16":
-        batch.audios = batch.audios.half()
+    if MODEL_DTYPE != "fp32":
+        batch.audios = batch.audios.to(DTYPE_MAP[MODEL_DTYPE])
     with torch.inference_mode():
         result = model.separate(
             batch,
@@ -173,8 +192,8 @@ def separate_batch(request: BatchSeparateRequest):
         audios=[str(audio_path)] * n_prompts,
         descriptions=request.prompts,
     ).to("cuda")
-    if MODEL_DTYPE == "fp16":
-        batch.audios = batch.audios.half()
+    if MODEL_DTYPE != "fp32":
+        batch.audios = batch.audios.to(DTYPE_MAP[MODEL_DTYPE])
 
     with torch.inference_mode():
         result = model.separate(

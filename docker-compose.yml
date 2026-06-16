@@ -15,6 +15,7 @@ services:
       - SAM_AUDIO_MODEL_ID=${SAM_AUDIO_MODEL_ID:-facebook/sam-audio-large}
       - SAM_AUDIO_RERANKING_CANDIDATES=${SAM_RERANKING_CANDIDATES:-8}
       - SAM_AUDIO_DTYPE=${SAM_AUDIO_DTYPE:-fp32}
+      - SAM_AUDIO_RANKER_DTYPE=${SAM_AUDIO_RANKER_DTYPE:-fp32}
       - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
     deploy:
       resources:
