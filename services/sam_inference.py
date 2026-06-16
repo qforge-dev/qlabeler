@@ -25,6 +25,7 @@ from fastapi.staticfiles import StaticFiles
 
 MODEL_ID = os.environ.get("SAM_AUDIO_MODEL_ID", "facebook/sam-audio-large")
 RERANKING_CANDIDATES = int(os.environ.get("SAM_AUDIO_RERANKING_CANDIDATES", "8"))
+MODEL_DTYPE = os.environ.get("SAM_AUDIO_DTYPE", "fp32")  # fp32 or fp16
 OUTPUT_DIR = Path(os.environ.get("OUTPUT_DIR", "/app/outputs/sam"))
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -43,6 +44,8 @@ def get_model():
         return _model, _processor
     from sam_audio import SAMAudio, SAMAudioProcessor
     _model = SAMAudio.from_pretrained(MODEL_ID, proxies=None, resume_download=False).eval().cuda()
+    if MODEL_DTYPE == "fp16":
+        _model = _model.half()
     _processor = SAMAudioProcessor.from_pretrained(MODEL_ID)
     return _model, _processor
 
@@ -94,6 +97,8 @@ def separate(request: SeparateRequest):
 
     # Run separation
     batch = processor(audios=[str(audio_path)], descriptions=[request.prompt]).to("cuda")
+    if MODEL_DTYPE == "fp16":
+        batch.audios = batch.audios.half()
     with torch.inference_mode():
         result = model.separate(
             batch,
@@ -168,6 +173,8 @@ def separate_batch(request: BatchSeparateRequest):
         audios=[str(audio_path)] * n_prompts,
         descriptions=request.prompts,
     ).to("cuda")
+    if MODEL_DTYPE == "fp16":
+        batch.audios = batch.audios.half()
 
     with torch.inference_mode():
         result = model.separate(
