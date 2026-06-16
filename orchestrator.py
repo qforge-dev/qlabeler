@@ -21,7 +21,9 @@ import requests
 
 SAM_URL = os.environ.get("SAM_URL", "http://localhost:8002")
 OUTPUT_DIR = Path(os.environ.get("OUTPUT_DIR", "./outputs"))
-SHARED_DIR = Path(os.environ.get("SHARED_DIR", "/app/outputs"))
+SHARED_DIR = Path(os.environ.get("SHARED_DIR", "/home/ubuntu/outputs"))
+# Inside the Docker container, the shared dir is mounted at this path:
+CONTAINER_SHARED_DIR = os.environ.get("CONTAINER_SHARED_DIR", "/app/outputs")
 
 # Sound gate thresholds
 GATE_MIN_DBFS = -40.0
@@ -144,14 +146,20 @@ def apply_stereo_transfer(separated_mono: torch.Tensor, model_sr: int, source_pa
 
 def call_sam(audio_path: str, prompt: str, sam_url: str = SAM_URL) -> dict:
     """Call SAM-Audio API. Returns dict with target_path, residual_path, sample_rate."""
+    # Translate host path to container path
+    container_path = audio_path.replace(str(SHARED_DIR), CONTAINER_SHARED_DIR)
     resp = requests.post(
         f"{sam_url}/separate",
-        json={"audio_path": audio_path, "prompt": prompt},
-        timeout=300,
+        json={"audio_path": container_path, "prompt": prompt},
+        timeout=600,
     )
     if resp.status_code != 200:
         raise RuntimeError(f"SAM API error {resp.status_code}: {resp.text[:500]}")
-    return resp.json()
+    data = resp.json()
+    # Translate container paths back to host paths
+    data["target_path"] = data["target_path"].replace(CONTAINER_SHARED_DIR, str(SHARED_DIR))
+    data["residual_path"] = data["residual_path"].replace(CONTAINER_SHARED_DIR, str(SHARED_DIR))
+    return data
 
 
 def download_file(url_or_path: str, dest: Path) -> Path:
