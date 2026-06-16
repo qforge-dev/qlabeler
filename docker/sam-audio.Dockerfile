@@ -38,60 +38,12 @@ RUN pip install --no-warn-conflicts \
     pydub \
     "uvicorn[standard]"
 
+# Patch SAM-Audio audio loader
+COPY docker/patch_sam_audio.py /tmp/patch_sam_audio.py
+RUN python /tmp/patch_sam_audio.py && rm /tmp/patch_sam_audio.py
+
 # Copy application code
 COPY services/ /app/services/
-
-# Patch SAM-Audio audio loader (replace torchcodec AudioDecoder with torchaudio.load)
-RUN python -c "
-from pathlib import Path
-import site
-
-site_paths = [Path(base) for base in site.getsitepackages()]
-
-for path in [base / 'core' / 'audio_visual_encoder' / 'transforms.py' for base in site_paths]:
-    if path.exists():
-        break
-else:
-    raise SystemExit('Could not find core/audio_visual_encoder/transforms.py')
-
-text = path.read_text()
-if 'AudioDecoder' in text:
-    text = text.replace(
-        'from torchcodec.decoders import AudioDecoder, VideoDecoder\n',
-        'from torchcodec.decoders import VideoDecoder\nimport torchaudio\n',
-    )
-    text = text.replace(
-        '''    def _load_audio(self, path: str):
-        ad = AudioDecoder(path, sample_rate=self.sampling_rate, num_channels=1)
-        return ad.get_all_samples().data
-''',
-        '''    def _load_audio(self, path: str):
-        wav, sample_rate = torchaudio.load(path)
-        if wav.size(0) > 1:
-            wav = wav.mean(dim=0, keepdim=True)
-        if sample_rate != self.sampling_rate:
-            wav = torchaudio.functional.resample(wav, sample_rate, self.sampling_rate)
-        return wav
-''',
-    )
-    path.write_text(text)
-    print(f'patched {path}')
-
-for path in [base / 'sam_audio' / 'processor.py' for base in site_paths]:
-    if path.exists():
-        break
-else:
-    raise SystemExit('Could not find sam_audio/processor.py')
-
-text = path.read_text()
-if 'AudioDecoder' in text:
-    text = text.replace(
-        'from torchcodec.decoders import AudioDecoder, VideoDecoder\n',
-        'from torchcodec.decoders import VideoDecoder\n',
-    )
-    path.write_text(text)
-    print(f'patched {path}')
-"
 
 EXPOSE 8002
 
