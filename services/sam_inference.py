@@ -258,3 +258,118 @@ def separate_batch(request: BatchSeparateRequest):
         sample_rate=sample_rate,
         duration_seconds=round(duration, 3),
     )
+
+
+@app.post("/benchmark")
+def benchmark(request: SeparateRequest):
+    """Run separation with detailed timing of each stage."""
+    import time as _time
+    from sam_audio.model.model import DFLT_ODE_OPT
+    from torchdiffeq import odeint as _odeint
+
+    audio_path = Path(request.audio_path)
+    if not audio_path.exists():
+        raise HTTPException(status_code=422, detail=f"File not found: {audio_path}")
+
+    model, processor = get_model()
+    reranking = request.reranking_candidates or RERANKING_CANDIDATES
+    timings = {}
+
+    wav, sr = torchaudio.load(str(audio_path))
+    duration = wav.shape[-1] / sr
+
+    # Prepare batch
+    batch = processor(audios=[str(audio_path)], descriptions=[request.prompt]).to("cuda")
+    if MODEL_DTYPE != "fp32":
+        batch.audios = batch.audios.to(DTYPE_MAP[MODEL_DTYPE])
+
+    with torch.inference_mode():
+        torch.cuda.synchronize()
+
+        # 1. Audio encoding + text encoding
+        t0 = _time.time()
+        forward_args = model._get_forward_args(batch, candidates=reranking)
+        torch.cuda.synchronize()
+        timings["1_encoding"] = round(_time.time() - t0, 3)
+
+        # 2. Span prediction
+        t0 = _time.time()
+        if request.predict_spans and hasattr(model, "span_predictor") and batch.anchors is None:
+            batch = model.predict_spans(
+                batch=batch,
+                audio_features=model._unrepeat_from_reranking(forward_args["audio_features"], reranking),
+                audio_pad_mask=model._unrepeat_from_reranking(forward_args["audio_pad_mask"], reranking),
+            )
+            forward_args.update({
+                "anchor_ids": model._repeat_for_reranking(batch.anchor_ids, reranking),
+                "anchor_alignment": model._repeat_for_reranking(batch.anchor_alignment, reranking),
+            })
+        torch.cuda.synchronize()
+        timings["2_span_prediction"] = round(_time.time() - t0, 3)
+
+        # 3. ODE generation
+        audio_features = forward_args["audio_features"]
+        B, T, C = audio_features.shape
+        C = C // 2
+        noise = torch.randn_like(audio_features)
+
+        def vector_field(t, noisy_audio):
+            return model.forward(
+                noisy_audio=noisy_audio,
+                time=t.expand(noisy_audio.size(0)),
+                **forward_args,
+            )
+
+        t0 = _time.time()
+        states = _odeint(
+            vector_field, noise,
+            torch.tensor([0.0, 1.0], device=noise.device),
+            **DFLT_ODE_OPT,
+        )
+        torch.cuda.synchronize()
+        timings["3_ode_generation"] = round(_time.time() - t0, 3)
+
+        # 4. Audio decoding
+        generated_features = states[-1].transpose(1, 2)
+        t0 = _time.time()
+        wavs = model.audio_codec.decode(generated_features.float().reshape(2 * B, C, T)).view(B, 2, -1)
+        torch.cuda.synchronize()
+        timings["4_audio_decoding"] = round(_time.time() - t0, 3)
+
+        # 5. Reranking
+        bsz = wavs.size(0) // reranking
+        sizes = model.audio_codec.feature_idx_to_wav_idx(batch.sizes)
+        target_wavs = model.unbatch(wavs[:, 0].view(bsz, reranking, -1), sizes)
+
+        input_audio = [
+            audio[:, :size].expand(reranking, -1)
+            for audio, size in zip(batch.audios, sizes, strict=False)
+        ]
+
+        t0 = _time.time()
+        with torch.amp.autocast("cuda", dtype=torch.float32):
+            scores = model.text_ranker(
+                extracted_audio=target_wavs,
+                input_audio=input_audio,
+                descriptions=batch.descriptions,
+                sample_rate=model.audio_codec.sample_rate,
+            )
+        torch.cuda.synchronize()
+        timings["5_reranking"] = round(_time.time() - t0, 3)
+
+    total = sum(timings.values())
+    timings["total"] = round(total, 3)
+    timings["peak_vram_gb"] = round(torch.cuda.max_memory_allocated() / 1e9, 2)
+
+    # Percentages
+    pct = {k: f"{v/total*100:.1f}%" for k, v in timings.items() if k != "total" and k != "peak_vram_gb"}
+
+    return {
+        "model_id": MODEL_ID,
+        "model_dtype": MODEL_DTYPE,
+        "reranking_candidates": reranking,
+        "predict_spans": request.predict_spans,
+        "audio_duration_s": round(duration, 1),
+        "timings_seconds": timings,
+        "percentages": pct,
+    }
