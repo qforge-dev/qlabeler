@@ -332,7 +332,7 @@ def benchmark(request: SeparateRequest):
         # 4. Audio decoding
         generated_features = states[-1].transpose(1, 2)
         t0 = _time.time()
-        wavs = model.audio_codec.decode(generated_features.float().reshape(2 * B, C, T)).view(B, 2, -1)
+        wavs = model.audio_codec.decode(generated_features.reshape(2 * B, C, T)).view(B, 2, -1)
         torch.cuda.synchronize()
         timings["4_audio_decoding"] = round(_time.time() - t0, 3)
 
