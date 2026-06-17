@@ -78,6 +78,13 @@ def get_model():
     if MODEL_DTYPE != "fp32":
         if hasattr(_model, "text_ranker") and _model.text_ranker is not None:
             _model.text_ranker.float()
+            # Wrap ranker forward to ensure all inputs are cast to fp32
+            import types
+            _orig_ranker_forward = _model.text_ranker.forward
+            def _fp32_ranker_forward(*args, **kwargs):
+                with torch.amp.autocast("cuda", dtype=torch.float32):
+                    return _orig_ranker_forward(*args, **kwargs)
+            _model.text_ranker.forward = _fp32_ranker_forward
         if hasattr(_model, "visual_ranker") and _model.visual_ranker is not None:
             _model.visual_ranker.float()
 
